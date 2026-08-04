@@ -1,0 +1,452 @@
+package com.thorium.preview;
+
+import android.app.ActivityOptions;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Intent;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.provider.Settings;
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+
+public final class PreviewService extends Service {
+    public static final String ACTION_UPDATE = "com.thorium.preview.UPDATE";
+    public static final String ACTION_HIDE = "com.thorium.preview.HIDE";
+    public static final String ACTION_BLANK = "com.thorium.preview.BLANK";
+    public static final String ACTION_AUDIO = "com.thorium.preview.AUDIO";
+    public static final String ACTION_SUSPEND = "com.thorium.preview.SUSPEND";
+    public static final String ACTION_LAUNCH = "com.thorium.preview.LAUNCH";
+    public static final String EXTRA_VIDEO = "video";
+    public static final String EXTRA_ART = "art";
+    public static final String EXTRA_TITLE = "title";
+    public static final String EXTRA_SYSTEM = "system";
+    public static final String EXTRA_SCORE = "score";
+    public static final String EXTRA_PRELOAD_PREV = "preload_prev";
+    public static final String EXTRA_PRELOAD_NEXT = "preload_next";
+    public static final String EXTRA_PRELOAD_AUX = "preload_aux";
+    public static final String EXTRA_SOUND_ENABLED = "sound_enabled";
+    public static final String EXTRA_SEQUENCE = "sequence";
+    public static final int PORT = 43821;
+
+    private volatile boolean running;
+    private volatile long suppressPlayUntil;
+    private volatile boolean previewActive;
+    // Unlike a launch-time hide, TOP preview placement is persistent.  Do not
+    // let the normal Pegasus heartbeat resurrect lower-display playback until
+    // a subsequent /play request explicitly returns placement to the Thor.
+    private volatile boolean placementBlank;
+    private volatile long lastPegasusHeartbeat;
+    private volatile long lastPreviewSequence;
+    private volatile long requestedLaunchSequence;
+    private ImportManager importManager;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable pegasusWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!previewActive) return;
+            // On the Thor, touching a lower-screen launcher can move global
+            // application focus away from Pegasus, which pauses Pegasus' QML
+            // heartbeat before it has a chance to restore the preview. The
+            // service already knows whether playback is logically active, so
+            // reclaim a covered display directly. Launch-time blank/hide and
+            // top-PIP placement all set previewActive false first.
+            if (!PreviewActivity.isVisible()) showLastPlayer();
+            // Do not expire solely because global focus moved to display 4;
+            // that is the exact failure we are recovering from, and it pauses
+            // Qt's heartbeat. Game launch, top-PIP placement, and the user's
+            // double-tap dismissal all explicitly clear previewActive.
+            mainHandler.postDelayed(this, 750L);
+        }
+    };
+    private ServerSocket server;
+    private UpdateManager updateManager;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        importManager = new ImportManager(this);
+        updateManager = new UpdateManager(this);
+        ThemeInstaller.installBundledIfNeeded(this);
+        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        NotificationChannel channel = new NotificationChannel(
+                "preview", "Pegasus Lucent", NotificationManager.IMPORTANCE_MIN);
+        channel.setDescription("Synchronizes previews, imports games, and checks for updates");
+        manager.createNotificationChannel(channel);
+        Notification notification = new Notification.Builder(this, "preview")
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentTitle("Pegasus Lucent")
+                .setContentText("Preview, library import, and updates are active")
+                .setOngoing(true)
+                .build();
+        startForeground(43821, notification);
+        startServer();
+        // Both checks are independent and non-blocking. The importer is
+        // fingerprint-throttled, while the updater performs lightweight
+        // version checks and only downloads changed artifacts.
+        importManager.startInitialScan();
+        updateManager.checkAsync(false);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_SUSPEND.equals(intent.getAction())) {
+            placementBlank = true;
+            previewActive = false;
+            sendBroadcast(new Intent(ACTION_BLANK).setPackage(getPackageName()));
+        } else if (intent != null && ACTION_LAUNCH.equals(intent.getAction())) {
+            long sequence = intent.getLongExtra(EXTRA_SEQUENCE, 0L);
+            // Accept only the preview that is still visible. A delayed tap can
+            // never launch a game the user has already navigated away from.
+            if (previewActive && sequence > 0L && sequence == lastPreviewSequence)
+                requestedLaunchSequence = sequence;
+        }
+        startServer();
+        return START_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private synchronized void startServer() {
+        if (running) return;
+        running = true;
+        Thread thread = new Thread(this::serve, "thor-preview-http");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void serve() {
+        try {
+            server = new ServerSocket(PORT, 8, InetAddress.getByName("127.0.0.1"));
+            while (running) {
+                Socket socket = server.accept();
+                handle(socket);
+            }
+        } catch (Exception ignored) {
+            running = false;
+        }
+    }
+
+    private void handle(Socket socket) {
+        try (Socket client = socket;
+             BufferedReader reader = new BufferedReader(
+                     new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+             BufferedWriter writer = new BufferedWriter(
+                     new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8))) {
+            String request = reader.readLine();
+            String target = request == null ? "/" : request.split(" ")[1];
+            String path = target;
+            String query = "";
+            int separator = target.indexOf('?');
+            if (separator >= 0) {
+                path = target.substring(0, separator);
+                query = target.substring(separator + 1);
+            }
+
+            if ("/play".equals(path)) {
+                if (SystemClock.elapsedRealtime() < suppressPlayUntil) {
+                    respond(writer, "200 OK", "{\"ok\":true,\"suppressed\":true}");
+                    return;
+                }
+                placementBlank = false;
+                Map<String, String> values = parseQuery(query);
+                long sequence = parseLong(values.get("seq"));
+                if (sequence > 0L && sequence <= lastPreviewSequence) {
+                    respond(writer, "200 OK", "{\"ok\":true,\"stale\":true}");
+                    return;
+                }
+                if (sequence > 0L) lastPreviewSequence = sequence;
+                String video = values.getOrDefault("video", "");
+                String art = values.getOrDefault("art", "");
+                String title = values.getOrDefault("title", "");
+                String system = values.getOrDefault("system", "");
+                String score = values.getOrDefault("score", "");
+                String preloadPrev = values.getOrDefault("preload_prev", "");
+                String preloadNext = values.getOrDefault("preload_next", "");
+                String preloadAux = values.getOrDefault("preload_aux", "");
+                getSharedPreferences("preview", MODE_PRIVATE).edit()
+                        .putString(EXTRA_VIDEO, video)
+                        .putString(EXTRA_ART, art)
+                        .putString(EXTRA_TITLE, title)
+                        .putString(EXTRA_SYSTEM, system)
+                        .putString(EXTRA_SCORE, score)
+                        .putString(EXTRA_PRELOAD_PREV, preloadPrev)
+                        .putString(EXTRA_PRELOAD_NEXT, preloadNext)
+                        .putString(EXTRA_PRELOAD_AUX, preloadAux)
+                        .putLong(EXTRA_SEQUENCE, sequence)
+                        .apply();
+                previewActive = true;
+                lastPegasusHeartbeat = SystemClock.elapsedRealtime();
+                mainHandler.removeCallbacks(pegasusWatchdog);
+                mainHandler.postDelayed(pegasusWatchdog, 750L);
+                showPlayer(video, art, title, system, score,
+                        preloadPrev, preloadNext, preloadAux, sequence);
+                respond(writer, "200 OK", "{\"ok\":true}");
+            } else if ("/launch/status".equals(path)) {
+                // Reading consumes the request. The localhost response reaches
+                // Pegasus before it yields the top display to the emulator,
+                // preventing a launch from repeating when Pegasus resumes.
+                long sequence = requestedLaunchSequence;
+                requestedLaunchSequence = 0L;
+                respond(writer, "200 OK", "{\"seq\":" + sequence + "}");
+            } else if ("/heartbeat".equals(path)) {
+                long now = SystemClock.elapsedRealtime();
+                if (placementBlank) {
+                    respond(writer, "200 OK", "{\"ok\":true,\"placementBlank\":true}");
+                    return;
+                }
+                if (previewActive) {
+                    lastPegasusHeartbeat = now;
+                    // The lower launcher can cover a still-running Activity.
+                    // Reclaim only the secondary display while Pegasus is
+                    // actively heartbeating on the upper display.
+                    if (!PreviewActivity.isVisible()) showLastPlayer();
+                } else if (now >= suppressPlayUntil) {
+                    // Pegasus has become active again after a game, Home, or a
+                    // process restart. Restore the last selection without
+                    // requiring the user to move to another item first.
+                    previewActive = true;
+                    lastPegasusHeartbeat = now;
+                    mainHandler.removeCallbacks(pegasusWatchdog);
+                    mainHandler.postDelayed(pegasusWatchdog, 750L);
+                    showLastPlayer();
+                }
+                respond(writer, "200 OK", "{\"ok\":true}");
+            } else if ("/hide".equals(path)) {
+                suppressPlayUntil = SystemClock.elapsedRealtime() + 1500L;
+                previewActive = false;
+                sendBroadcast(new Intent(ACTION_HIDE).setPackage(getPackageName()));
+                respond(writer, "200 OK", "{\"ok\":true}");
+            } else if ("/transition".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                long sequence = parseLong(values.get("seq"));
+                if (sequence > 0L && sequence <= lastPreviewSequence) {
+                    respond(writer, "200 OK", "{\"ok\":true,\"stale\":true}");
+                    return;
+                }
+                if (sequence > 0L) lastPreviewSequence = sequence;
+                // A navigation transition is not a launch-time blank. Keep
+                // the outgoing decoded frame visible until /play reports that
+                // the incoming decoder has rendered; PreviewActivity then
+                // performs the short crossfade.
+                suppressPlayUntil = 0L;
+                previewActive = true;
+                lastPegasusHeartbeat = SystemClock.elapsedRealtime();
+                respond(writer, "200 OK", "{\"ok\":true}");
+            } else if ("/capabilities".equals(path)) {
+                boolean dualScreen = BootReceiver.secondaryDisplayId(this) >= 0;
+                boolean soundEnabled = getSharedPreferences("preview", MODE_PRIVATE)
+                        .getBoolean(EXTRA_SOUND_ENABLED, false);
+                respond(writer, "200 OK", "{\"dualScreen\":" + dualScreen
+                        + ",\"previewPlacement\":\""
+                        + (dualScreen ? "secondary-display" : "upper-right-pip")
+                        + "\",\"soundEnabled\":" + soundEnabled + "}");
+            } else if ("/audit/artwork".equals(path)) {
+                try {
+                    respond(writer, "200 OK", ArtworkAudit.run(new java.io.File(
+                            android.os.Environment.getExternalStorageDirectory(),
+                            "pegasus-frontend")).toString());
+                } catch (Exception error) {
+                    Log.e("ArtworkAudit", "Audit failed", error);
+                    respond(writer, "500 Internal Server Error",
+                            "{\"error\":\"artwork audit failed\"}");
+                }
+            } else if ("/settings/sound".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                String requested = values.getOrDefault("enabled", "0");
+                boolean enabled = !"0".equals(requested)
+                        && !"false".equalsIgnoreCase(requested);
+                getSharedPreferences("preview", MODE_PRIVATE).edit()
+                        .putBoolean(EXTRA_SOUND_ENABLED, enabled)
+                        .apply();
+                sendBroadcast(new Intent(ACTION_AUDIO)
+                        .setPackage(getPackageName())
+                        .putExtra(EXTRA_SOUND_ENABLED, enabled));
+                respond(writer, "200 OK", "{\"ok\":true,\"soundEnabled\":"
+                        + enabled + "}");
+            } else if ("/blank".equals(path)) {
+                placementBlank = true;
+                suppressPlayUntil = SystemClock.elapsedRealtime() + 1500L;
+                previewActive = false;
+                sendBroadcast(new Intent(ACTION_BLANK).setPackage(getPackageName()));
+                respond(writer, "200 OK", "{\"ok\":true}");
+            } else if ("/import/scan".equals(path)) {
+                importManager.startScan();
+                respond(writer, "202 Accepted", importManager.statusJson());
+            } else if ("/import/status".equals(path)) {
+                respond(writer, "200 OK", importManager.statusJson());
+            } else if ("/archive/list".equals(path)) {
+                respond(writer, "200 OK", importManager.archiveJson());
+            } else if ("/archive/include".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                boolean included = importManager.includeArchived(values.getOrDefault("id", ""));
+                respond(writer, included ? "200 OK" : "404 Not Found",
+                        "{\"ok\":" + included + "}");
+            } else if ("/update/check".equals(path)) {
+                updateManager.checkAsync(true);
+                respond(writer, "202 Accepted", updateManager.statusJson());
+            } else if ("/update/status".equals(path)) {
+                respond(writer, "200 OK", updateManager.statusJson());
+            } else if ("/update/install".equals(path)) {
+                updateManager.installDownloadedApk();
+                respond(writer, "202 Accepted", updateManager.statusJson());
+            } else {
+                respond(writer, "200 OK", "{\"service\":\"pegasus-lucent\",\"ok\":true}");
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static long parseLong(String value) {
+        if (value == null || value.isEmpty()) return 0L;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    private void showPlayer(String video, String art, String title,
+                            String system, String score,
+                            String preloadPrev, String preloadNext, String preloadAux,
+                            long sequence) {
+        Intent update = new Intent(ACTION_UPDATE)
+                .setPackage(getPackageName())
+                .putExtra(EXTRA_VIDEO, video)
+                .putExtra(EXTRA_ART, art)
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_SYSTEM, system)
+                .putExtra(EXTRA_SCORE, score)
+                .putExtra(EXTRA_PRELOAD_PREV, preloadPrev)
+                .putExtra(EXTRA_PRELOAD_NEXT, preloadNext)
+                .putExtra(EXTRA_PRELOAD_AUX, preloadAux)
+                .putExtra(EXTRA_SEQUENCE, sequence);
+        if (PreviewActivity.isVisible()) {
+            sendBroadcast(update);
+            return;
+        }
+
+        // A retained Activity can still be hidden behind the secondary
+        // launcher. In that state a broadcast updates decoders but leaves the
+        // launcher visible, so explicitly reorder the lower-display task.
+        // Never use AppTask.moveToFront(): AYN's shared display group can then
+        // disturb Pegasus on display 0.
+        Intent activity = new Intent(this, PreviewActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                .putExtra(EXTRA_VIDEO, video)
+                .putExtra(EXTRA_ART, art)
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_SYSTEM, system)
+                .putExtra(EXTRA_SCORE, score)
+                .putExtra(EXTRA_PRELOAD_PREV, preloadPrev)
+                .putExtra(EXTRA_PRELOAD_NEXT, preloadNext)
+                .putExtra(EXTRA_PRELOAD_AUX, preloadAux)
+                .putExtra(EXTRA_SEQUENCE, sequence);
+        ActivityOptions options = ActivityOptions.makeBasic();
+        int displayId = BootReceiver.secondaryDisplayId(this);
+        // The native companion is exclusively a physical-secondary-display
+        // player. Single-screen devices render their preview as a QML PIP in
+        // Pegasus instead of opening a full-screen Android activity.
+        if (displayId < 0) return;
+        options.setLaunchDisplayId(displayId);
+        if (Build.VERSION.SDK_INT >= 34) {
+            options.setPendingIntentCreatorBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+            options.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+        }
+        try {
+            // The user-granted overlay capability is also Android's explicit
+            // exemption for a background service to restore a user-visible
+            // activity.  Direct launch is required on Android 13: a
+            // self-created PendingIntent can be silently accepted yet leave a
+            // different task covering display 4.
+            if (Settings.canDrawOverlays(this)) {
+                startActivity(activity, options.toBundle());
+                return;
+            }
+            // Android blocks a foreground service from directly restoring an
+            // activity after it has been sent behind the secondary launcher.
+            // A creator-and-sender opted-in PendingIntent is the platform's
+            // supported route for this user-visible playback transition.
+            PendingIntent pending = PendingIntent.getActivity(
+                    this, 43821, activity,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE,
+                    options.toBundle());
+            pending.send(this, 0, null, null, null, null, options.toBundle());
+        } catch (PendingIntent.CanceledException | RuntimeException error) {
+            Log.e("ThorPreview", "Unable to restore preview activity on display "
+                    + displayId, error);
+        }
+    }
+
+    private void showLastPlayer() {
+        android.content.SharedPreferences preferences =
+                getSharedPreferences("preview", MODE_PRIVATE);
+        showPlayer(
+                preferences.getString(EXTRA_VIDEO, ""),
+                preferences.getString(EXTRA_ART, ""),
+                preferences.getString(EXTRA_TITLE, ""),
+                preferences.getString(EXTRA_SYSTEM, ""),
+                preferences.getString(EXTRA_SCORE, ""),
+                preferences.getString(EXTRA_PRELOAD_PREV, ""),
+                preferences.getString(EXTRA_PRELOAD_NEXT, ""),
+                preferences.getString(EXTRA_PRELOAD_AUX, ""),
+                preferences.getLong(EXTRA_SEQUENCE, 0L));
+    }
+
+    private static Map<String, String> parseQuery(String query) throws Exception {
+        Map<String, String> values = new HashMap<>();
+        if (query.isEmpty()) return values;
+        for (String pair : query.split("&")) {
+            String[] item = pair.split("=", 2);
+            String key = URLDecoder.decode(item[0], "UTF-8");
+            String value = item.length > 1 ? URLDecoder.decode(item[1], "UTF-8") : "";
+            values.put(key, value);
+        }
+        return values;
+    }
+
+    private static void respond(BufferedWriter writer, String status, String body) throws Exception {
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        writer.write("HTTP/1.1 " + status + "\r\n");
+        writer.write("Content-Type: application/json\r\n");
+        writer.write("Access-Control-Allow-Origin: *\r\n");
+        writer.write("Content-Length: " + bytes.length + "\r\n");
+        writer.write("Connection: close\r\n\r\n");
+        writer.write(body);
+        writer.flush();
+    }
+
+    @Override
+    public void onDestroy() {
+        running = false;
+        previewActive = false;
+        mainHandler.removeCallbacks(pegasusWatchdog);
+        try {
+            if (server != null) server.close();
+        } catch (Exception ignored) {
+        }
+        super.onDestroy();
+    }
+}
