@@ -967,8 +967,10 @@ final class ImportManager {
                             "/stats/web" + userQuery, 8L * 1024L * 1024L), StandardCharsets.UTF_8));
             JSONObject user = userRoot.optJSONObject("data") == null ? null :
                     userRoot.optJSONObject("data").optJSONObject("item");
-            if (user != null && user.optDouble("score", 0) > 0)
+            if (user != null && user.optDouble("score", 0) > 0) {
                 game.user = user.optDouble("score");
+                game.metacriticUser = game.user;
+            }
         } catch (Exception error) {
             // Search-level data is retained if a detail endpoint is unavailable.
             Log.w(TAG, "Metacritic detail unavailable for " + game.title, error);
@@ -1485,7 +1487,15 @@ final class ImportManager {
     private String canonicalTitle(GameSystems.SystemDef system, String title, File cacheRoot) {
         try {
             CatalogMatch match = boxArtMatch(system, title, cacheRoot);
-            return match == null ? "" : match.title;
+            if (match == null) return "";
+            String canonical = cleanTitle(match.title);
+            String source = cleanTitle(title);
+            // Catalogs occasionally expose a ROM-dat filename rather than a
+            // display title. Keep the source title's punctuation when both
+            // identities match exactly and only the catalog added dump tags.
+            if (looksLikeDumpTitle(match.title) &&
+                    normalize(source).equals(normalize(canonical))) return source;
+            return canonical;
         } catch (Exception ignored) {
             return "";
         }
@@ -1672,6 +1682,15 @@ final class ImportManager {
     }
 
     private void writeMetadata(JSONArray registry) throws Exception {
+        // Generated metadata is rebuilt frequently (startup, media repair, and
+        // imports). Older builds treated the registry as the only source of
+        // truth and silently discarded exact historical enrichment that had
+        // subsequently been added to the Pegasus metafiles. Hydrate missing
+        // registry fields from the current stanza with the same canonical ROM
+        // path before rendering. The ROM path is deliberately the only join
+        // key: similarly named regional releases must never borrow metadata.
+        if (hydrateRegistryFromExistingMetadata(registry))
+            writeJsonAtomic(REGISTRY, registry);
         Map<String, LinkedHashMap<String, JSONObject>> groups = new LinkedHashMap<>();
         for (int i = 0; i < registry.length(); i++) {
             JSONObject row = registry.optJSONObject(i);
@@ -1679,7 +1698,7 @@ final class ImportManager {
             if (row.optBoolean("archived", false) &&
                     !row.optBoolean("forceInclude", false)) continue;
             String folder = row.optString("system");
-            String identity = normalize(row.optString("title"));
+            String identity = dedupeGameIdentity(row.optString("title"));
             LinkedHashMap<String, JSONObject> games = groups.computeIfAbsent(
                     folder, key -> new LinkedHashMap<>());
             JSONObject previous = games.get(identity);
@@ -1695,7 +1714,11 @@ final class ImportManager {
                     String.CASE_INSENSITIVE_ORDER));
             StringBuilder out = new StringBuilder(
                     "# Generated atomically by Lucent Library Importer.\n");
-            out.append("\ncollection: ").append(system.collection).append('\n');
+            // The owner's library intentionally groups the lone PC Engine CD
+            // title with Windows instead of exposing a one-game platform card.
+            String displayCollection = "pcenginecd".equals(system.folder) ?
+                    "Microsoft Windows" : system.collection;
+            out.append("\ncollection: ").append(displayCollection).append('\n');
             out.append("shortname: ").append(system.folder).append('\n');
             String launch = launchCommand(system.folder);
             if (!launch.isEmpty()) out.append("launch: ").append(launch).append('\n');
@@ -1703,11 +1726,12 @@ final class ImportManager {
             for (JSONObject row : games)
                 out.append("  ").append(metadataSafe(row.optString("file"))).append('\n');
             for (JSONObject row : games) {
-                out.append("\ngame: ").append(metadataSafe(row.optString("title"))).append('\n');
+                String displayTitle = cleanTitle(row.optString("title"));
+                out.append("\ngame: ").append(metadataSafe(displayTitle)).append('\n');
                 double userScore = row.optDouble("user", 0);
                 int userKey = userScore > 0 ? Math.max(0, 10000 - (int)Math.round(userScore * 1000)) : 99999;
                 out.append("sort-by: ").append(String.format(Locale.US, "%05d", userKey))
-                        .append(' ').append(metadataSafe(row.optString("title").toLowerCase(Locale.US)))
+                        .append(' ').append(metadataSafe(displayTitle.toLowerCase(Locale.US)))
                         .append('\n');
                 int criticScore = row.optInt("critic", 0);
                 if (criticScore > 0)
@@ -1723,8 +1747,22 @@ final class ImportManager {
                 if (userScore > 0) {
                     out.append("x-user-score: ").append(format(userScore)).append('\n');
                     out.append("x-user-composite: ").append(format(userScore)).append('\n');
-                    out.append("x-metacritic-user: ").append(format(userScore)).append('\n');
-                    out.append("x-user-sources: Metacritic users=").append(format(userScore)).append('\n');
+                    double metacriticUser = row.optDouble("metacriticUser", 0);
+                    double gamefaqsUser = row.optDouble("gamefaqsUser", 0);
+                    if (metacriticUser > 0)
+                        out.append("x-metacritic-user: ").append(format(metacriticUser)).append('\n');
+                    if (gamefaqsUser > 0) {
+                        out.append("x-gamefaqs-user: ").append(format(gamefaqsUser)).append('\n');
+                        if (!row.optString("gamefaqsUrl").isEmpty())
+                            out.append("x-gamefaqs-url: ")
+                                    .append(metadataSafe(row.optString("gamefaqsUrl"))).append('\n');
+                    }
+                    String preservedUserSources = row.optString("userSources");
+                    if (!preservedUserSources.isEmpty())
+                        out.append("x-user-sources: ").append(metadataSafe(preservedUserSources)).append('\n');
+                    else if (metacriticUser > 0)
+                        out.append("x-user-sources: Metacritic users=")
+                                .append(format(metacriticUser)).append('\n');
                 }
                 if (criticScore > 0) {
                     double normalizedCritic = criticScore / 10.0;
@@ -1764,7 +1802,11 @@ final class ImportManager {
                                 format(row.optDouble("mobygamesScore") / 10.0) + " (n=5 min)");
                     }
                     out.append("x-score-source: weighted composite\n");
-                    out.append("x-critic-sources: ").append(join(criticSources, " | ")).append('\n');
+                    String preservedCriticSources = row.optString("criticSources");
+                    out.append("x-critic-sources: ")
+                            .append(criticSources.isEmpty() && !preservedCriticSources.isEmpty() ?
+                                    metadataSafe(preservedCriticSources) : join(criticSources, " | "))
+                            .append('\n');
                 }
                 if (!row.optString("release").isEmpty())
                     out.append("release: ").append(metadataSafe(row.optString("release"))).append('\n');
@@ -1796,6 +1838,115 @@ final class ImportManager {
         writeTextAtomic(LEGACY_AUTO_METADATA, retired);
     }
 
+    private static boolean hydrateRegistryFromExistingMetadata(JSONArray registry) {
+        Map<String, String> stanzaByPath = new HashMap<>();
+        Set<String> registryPaths = new HashSet<>();
+        for (int index = 0; index < registry.length(); index++) {
+            JSONObject row = registry.optJSONObject(index);
+            if (row != null && !row.optString("file").isEmpty())
+                registryPaths.add(canonical(row.optString("file")));
+        }
+        boolean addedRows = false;
+        for (File metadata : metadataFiles()) {
+            try {
+                for (String stanza : splitStanzas(readText(metadata))) {
+                    String path = field(stanza, "file");
+                    if (path.isEmpty()) continue;
+                    String key = canonical(path);
+                    String previous = stanzaByPath.get(key);
+                    if (previous == null || metadataStanzaRichness(stanza) >
+                            metadataStanzaRichness(previous))
+                        stanzaByPath.put(key, stanza);
+                }
+            } catch (Exception ignored) {}
+        }
+        // A verified ROM may predate the registry while still having a valid
+        // per-system Lucent metafile. Never delete that game merely because a
+        // newer scan rebuilds generated files from the registry. Reconcile
+        // only Lucent-owned auto metafiles; hand-authored/core collections are
+        // intentionally not duplicated into the importer registry.
+        for (File metadata : metadataFiles()) {
+            String name = metadata.getName();
+            if (!name.startsWith("99-lucent-auto-") ||
+                    name.equals("99-lucent-auto-import.metadata.pegasus.txt")) continue;
+            try {
+                for (String stanza : splitStanzas(readText(metadata))) {
+                    String path = field(stanza, "file");
+                    String title = field(stanza, "game");
+                    if (path.isEmpty() || title.isEmpty() || !new File(path).isFile()) continue;
+                    String canonicalPath = canonical(path);
+                    if (registryPaths.contains(canonicalPath)) continue;
+                    GameSystems.SystemDef system = systemFromRomPath(path);
+                    if (system == null) continue;
+                    JSONObject row = new JSONObject();
+                    row.put("sourceIdentity", field(stanza, "x-lucent-id").isEmpty() ?
+                            canonicalPath + ":" + new File(path).length() :
+                            field(stanza, "x-lucent-id"));
+                    row.put("system", system.folder);
+                    row.put("title", cleanTitle(title));
+                    row.put("file", path);
+                    row.put("boxArt", field(stanza, "assets.boxFront"));
+                    row.put("background", field(stanza, "assets.background"));
+                    row.put("video", field(stanza, "assets.video"));
+                    row.put("enrichmentVersion", 2);
+                    row.put("archived", false);
+                    row.put("forceInclude", false);
+                    registry.put(row);
+                    registryPaths.add(canonicalPath);
+                    addedRows = true;
+                }
+            } catch (Exception ignored) {}
+        }
+        for (int index = 0; index < registry.length(); index++) {
+            JSONObject row = registry.optJSONObject(index);
+            if (row == null) continue;
+            String stanza = stanzaByPath.get(canonical(row.optString("file")));
+            if (stanza == null) continue;
+            try {
+                String exactTitle = field(stanza, "game");
+                if (!exactTitle.isEmpty()) row.put("title", cleanTitle(exactTitle));
+                putNumericIfMissing(row, "user", field(stanza, "x-user-score"), 1.0);
+                putNumericIfMissing(row, "critic", field(stanza, "x-critic"), 10.0);
+                putNumericIfMissing(row, "metacriticUser", field(stanza, "x-metacritic-user"), 1.0);
+                putNumericIfMissing(row, "gamefaqsUser", field(stanza, "x-gamefaqs-user"), 1.0);
+                putNumericIfMissing(row, "metacriticCritic", field(stanza, "x-metacritic-critic"), 1.0);
+                putNumericIfMissing(row, "gamerankingsScore", field(stanza, "x-gamerankings-score"), 10.0);
+                putNumericIfMissing(row, "gamerankingsReviews", field(stanza, "x-gamerankings-reviews"), 1.0);
+                putNumericIfMissing(row, "mobygamesScore", field(stanza, "x-mobygames-critic"), 10.0);
+                putStringIfMissing(row, "release", field(stanza, "release"));
+                putStringIfMissing(row, "gamerankingsUrl", field(stanza, "x-gamerankings-url"));
+                putStringIfMissing(row, "mobygamesUrl", field(stanza, "x-mobygames-url"));
+                putStringIfMissing(row, "gamefaqsUrl", field(stanza, "x-gamefaqs-url"));
+                putStringIfMissing(row, "userSources", field(stanza, "x-user-sources"));
+                putStringIfMissing(row, "criticSources", field(stanza, "x-critic-sources"));
+            } catch (Exception ignored) {}
+        }
+        return addedRows;
+    }
+
+    private static void putNumericIfMissing(JSONObject row, String key, String raw, double scale) {
+        if (row.optDouble(key, 0) > 0 || raw == null || raw.trim().isEmpty()) return;
+        try {
+            double value = Double.parseDouble(raw.trim().replace("%", "")) * scale;
+            if (value > 0) row.put(key, value);
+        } catch (Exception ignored) {}
+    }
+
+    private static void putStringIfMissing(JSONObject row, String key, String value) {
+        if (!row.optString(key).isEmpty() || value == null || value.trim().isEmpty()) return;
+        try { row.put(key, value.trim()); } catch (Exception ignored) {}
+    }
+
+    private static int metadataStanzaRichness(String stanza) {
+        int score = 0;
+        String[] valuable = {"x-critic", "x-user-score", "release", "x-gamefaqs-user",
+                "x-gamerankings-score", "x-mobygames-critic", "x-metacritic-critic",
+                "assets.boxFront", "assets.background", "assets.video"};
+        for (String name : valuable)
+            if (!field(stanza, name).isEmpty()) score++;
+        return score;
+    }
+
     private static void cleanupGeneratedMetadata(File directory, Set<String> keep) {
         File[] files = directory.listFiles((dir, name) ->
                 name.startsWith("99-lucent-auto-") &&
@@ -1815,6 +1966,17 @@ final class ImportManager {
         if (value.optDouble("user", 0) > 0) quality += 3;
         if (!value.optString("release").isEmpty()) quality += 2;
         return quality;
+    }
+
+    private static String dedupeGameIdentity(String title) {
+        // Catalogs disagree about leading articles, ampersands, and whether a
+        // subtitle separator is rendered as ':' or '&'. Those presentation
+        // differences must not produce two cards for the same game. This key
+        // is used only inside one platform; launch paths remain untouched.
+        String relaxed = normalize(title)
+                .replaceAll("\\b(?:the|a|an|and)\\b", " ")
+                .replaceAll("\\s+", " ").trim();
+        return scoreAlias(relaxed);
     }
 
     private String launchCommand(String system) {
@@ -2079,9 +2241,14 @@ final class ImportManager {
         String scoreSource = "";
         String gamerankingsUrl = "";
         String mobygamesUrl = "";
+        String gamefaqsUrl = "";
+        String userSources = "";
+        String criticSources = "";
         final List<String> developers = new ArrayList<>();
         final List<String> publishers = new ArrayList<>();
         double user;
+        double metacriticUser;
+        double gamefaqsUser;
         double gamerankingsScore;
         double mobygamesScore;
         int critic;
@@ -2115,7 +2282,13 @@ final class ImportManager {
             game.scoreSource = value.optString("scoreSource");
             game.gamerankingsUrl = value.optString("gamerankingsUrl");
             game.mobygamesUrl = value.optString("mobygamesUrl");
+            game.gamefaqsUrl = value.optString("gamefaqsUrl");
+            game.userSources = value.optString("userSources");
+            game.criticSources = value.optString("criticSources");
             game.user = value.optDouble("user", 0);
+            game.metacriticUser = value.has("metacriticUser") ?
+                    value.optDouble("metacriticUser", 0) : game.user;
+            game.gamefaqsUser = value.optDouble("gamefaqsUser", 0);
             game.gamerankingsScore = value.optDouble("gamerankingsScore", 0);
             game.mobygamesScore = value.optDouble("mobygamesScore", 0);
             game.critic = value.optInt("critic", 0);
@@ -2145,8 +2318,12 @@ final class ImportManager {
                 value.put("boxArt", boxArt); value.put("background", background);
                 value.put("video", video);
                 value.put("user", user); value.put("critic", critic);
+                value.put("metacriticUser", metacriticUser);
+                value.put("gamefaqsUser", gamefaqsUser);
                 value.put("release", release); value.put("metacriticSlug", metacriticSlug);
                 value.put("scoreSource", scoreSource);
+                value.put("userSources", userSources);
+                value.put("criticSources", criticSources);
                 value.put("metacriticCritic", metacriticCritic);
                 value.put("metacriticReviews", metacriticReviews);
                 value.put("gamerankingsScore", gamerankingsScore);
@@ -2154,6 +2331,7 @@ final class ImportManager {
                 value.put("gamerankingsUrl", gamerankingsUrl);
                 value.put("mobygamesScore", mobygamesScore);
                 value.put("mobygamesUrl", mobygamesUrl);
+                value.put("gamefaqsUrl", gamefaqsUrl);
                 value.put("enrichmentVersion", enriched ? 2 : 0);
                 value.put("archived", archived);
                 value.put("archiveReason", archived ? "missing-box-art" : "");
@@ -2266,26 +2444,57 @@ final class ImportManager {
         int dot = name.lastIndexOf('.'); return dot > 0 ? name.substring(0, dot) : name;
     }
     private static String cleanTitle(String value) {
-        String title = value.replace('_', ' ').trim();
+        String title = value.replaceAll("\\s*_+\\s*", ": ").trim();
+        title = title.replaceAll("(?i)(?:\\s*[:\\-]\\s*)copy$", "").trim();
         // Switch dumps commonly append a 16-digit title ID and version tag.
         // They are identifiers, not part of the display title, and prevent
         // exact media/score matching if retained.
         title = title.replaceAll("(?i)[.\\s-]*[0-9a-f]{16}(?:[.\\s-]*v\\d+)?$", "")
                 .replaceAll("(?i)\\s*\\[[0-9a-f]{16}\\]", "")
-                .replaceAll("(?i)\\s*\\[v\\d+\\]", "").trim();
+                .replaceAll("(?i)\\s*\\[v\\d+\\]", "")
+                .replaceAll("(?i)\\s+v\\d+(?:[ .]\\d+)+$", "")
+                .replaceAll("(?i)\\s+[—:-]\\s+disc\\s+\\d+(?:\\s+of\\s+\\d+)?$", "")
+                .replaceAll("(?i)\\s*\\((?:USA|US|U|Europe|EU|E|Japan|JP|J|W|UE)\\b.*$", "")
+                .trim();
         // Dot-separated scene/download names are filenames, not display
         // titles. Canonical catalog matching can restore legitimate internal
         // punctuation after this normalization.
-        if (title.matches(".*[A-Za-z0-9]\\.[A-Za-z0-9].*")) title = title.replace('.', ' ');
+        if (!title.contains(" ") && title.matches(".*[A-Za-z0-9]\\.[A-Za-z0-9].*"))
+            title = title.replace('.', ' ');
+        title = title.replaceFirst(
+                "(?i)\\s*\\((?:19|20)[0-9x]{2}(?:[-.][0-9x]{1,2}){0,2}\\).*$", "");
         String previous;
         do {
             previous = title;
-            title = title.replaceAll("\\s*[\\[(](?:USA|Europe|Japan|World|En(?:,[A-Za-z]+)*|Rev[^\\])]*|v?\\d+(?:[ .]\\d+)*|!|b|h|t[^\\])]*)[\\])]\\s*$", "").trim();
+            title = title.replaceAll(
+                    "(?i)\\s*[\\[(](?:USA|US|U|Europe|EU|E|Japan|JP|J|World|" +
+                    "En(?:,[A-Za-z]+)*|Rev[^\\])]*|v?\\d+(?:[ .]\\d+)*|!|b|h|n|p|" +
+                    "t[^\\])]*|Unl(?:icensed)?|Beta|Proto(?:type)?|Demo|" +
+                    "Kiosk|Bonus Disc|Virtual Console|NTSC|PAL|" +
+                    "Disc\\s+\\d+(?:\\s+of\\s+\\d+)?)[\\])]\\s*$",
+                    "").trim();
         } while (!title.equals(previous));
         title = title.replaceAll("\\s+-\\s+", ": ").replaceAll("\\s+", " ").trim();
+        Matcher embeddedArticle = Pattern.compile("^(.+), (The|A|An)(\\s*[:\\-].*)$",
+                Pattern.CASE_INSENSITIVE).matcher(title);
+        if (embeddedArticle.matches())
+            title = embeddedArticle.group(2) + " " + embeddedArticle.group(1) +
+                    embeddedArticle.group(3);
         Matcher article = Pattern.compile("^(.+), (The|A|An)$", Pattern.CASE_INSENSITIVE).matcher(title);
         if (article.matches()) title = article.group(2) + " " + article.group(1);
+        Matcher zeldaSubtitle = Pattern.compile(
+                "^(The Legend of Zelda) (Collector's Edition|Four Swords Adventures)$",
+                Pattern.CASE_INSENSITIVE).matcher(title);
+        if (zeldaSubtitle.matches())
+            title = zeldaSubtitle.group(1) + ": " + zeldaSubtitle.group(2);
         return title.isEmpty() ? "Untitled Game" : title;
+    }
+
+    private static boolean looksLikeDumpTitle(String value) {
+        return value != null && (value.matches("(?is).*\\((?:19|20)[0-9x]{2}.*") ||
+                value.matches("(?is).*[\\[(](?:USA|US|U|Europe|EU|E|Japan|JP|J|World|" +
+                        "Beta|Proto(?:type)?|Unl(?:icensed)?|Rev[^\\])]*|T-En[^\\])]*)" +
+                        "[\\])].*"));
     }
 
     private static boolean isSwitchExtension(String extension) {

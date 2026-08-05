@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.18"
+    readonly property string lucentVersion: "3.0.19"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -1950,7 +1950,6 @@ FocusScope {
         ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#ffb454" }
         ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#ff5c6c" }
         ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#24c7d9" }
-        ListElement { name: "PC ENGINE CD"; years: "1988–1999"; mark: "PCE CD"; collectionName: "NEC PC Engine CD"; folder: "pcenginecd"; accent: "#f2d35f" }
         ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#ff5c6c" }
         ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#24c7d9" }
         ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#ff5c6c" }
@@ -2736,27 +2735,23 @@ FocusScope {
                 }
             }
 
-            Rectangle {
+            Item {
                 id: lucentSettingsButton
                 anchors.right: searchControl.left
                 anchors.rightMargin: 14
                 anchors.verticalCenter: parent.verticalCenter
-                width: 44
-                height: 40
-                color: root.settingsOpen ? root.accent : "#b3090d14"
-                border.width: 1
-                border.color: root.settingsOpen ? Qt.lighter(root.accent, 1.18) : "#4cffffff"
-                radius: 20
+                width: 38
+                height: 38
 
                 Image {
                     anchors.centerIn: parent
-                    width: 23
-                    height: 23
+                    width: 30
+                    height: 30
                     source: Qt.resolvedUrl("assets/settings-gear.svg")
                     fillMode: Image.PreserveAspectFit
                     smooth: true
                     mipmap: true
-                    opacity: root.settingsOpen ? 0.72 : 1.0
+                    opacity: root.settingsOpen ? 0.68 : 1.0
                 }
 
                 MouseArea {
@@ -3366,8 +3361,10 @@ FocusScope {
                     property real coverAspect: gameCover.status === Image.Ready &&
                             gameCover.sourceSize.height > 0 ?
                             gameCover.sourceSize.width / gameCover.sourceSize.height : 0.72
-                    property real boxWidth: Math.min(226, 318 * coverAspect)
-                    property real boxHeight: boxWidth / coverAspect
+                    // Contain every aspect ratio inside the artwork viewport;
+                    // the selected-card scale must stay below the sort row.
+                    property real boxHeight: Math.min(318, 226 / coverAspect)
+                    property real boxWidth: boxHeight * coverAspect
                     width: 250
                     height: 478
                     scale: ListView.isCurrentItem ? 1.08 : 0.91
@@ -3462,9 +3459,12 @@ FocusScope {
                     // single-screen cover its own square viewport between the
                     // sort controls and Android's usable bottom edge. A square
                     // cover then receives exactly 18 px on all four sides.
-                    y: !root.dualScreenDevice ? -76 : 0
+                    // Thor: the sort row ends at y=394 and this parent begins
+                    // at y=324, so 90 px provides a real gap before artwork.
+                    // The Flip retains its separate single-screen correction.
+                    y: !root.dualScreenDevice ? -76 : 90
                     width: 600
-                    height: !root.dualScreenDevice ? 600 : parent.height
+                    height: !root.dualScreenDevice ? 600 : parent.height - 90
                     property real coverAspect: listCover.status === Image.Ready &&
                             listCover.sourceSize.height > 0 ?
                             listCover.sourceSize.width / listCover.sourceSize.height : 0.72
