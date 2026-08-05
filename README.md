@@ -4,7 +4,8 @@ Lucent is a cinematic Pegasus Frontend theme and Android companion for handheld 
 
 ## Downloads
 
-- **Pegasus Lucent APK:** installs the companion service and the bundled Lucent theme.
+- **Pegasus Lucent APK:** installs the companion dashboard, automation service, and bundled Lucent theme.
+- **Lucent Controller APK:** updates the direct-launch bridge and optional Thor stop-button service.
 - **Lucent theme ZIP:** installs the theme by itself for an existing Pegasus setup.
 
 Use the assets attached to the [latest release](https://github.com/wildonrio/pegasus-lucent/releases/latest). The APK checks this repository when its service starts. Theme updates are applied inside Lucent; Android displays its normal confirmation screen before an APK update is installed.
@@ -24,8 +25,11 @@ Use the assets attached to the [latest release](https://github.com/wildonrio/peg
 
 1. Install [Pegasus Frontend](https://pegasus-frontend.org/) if it is not already installed.
 2. Install `pegasus-lucent.apk` from the latest release.
-3. Open **Pegasus Lucent** once and grant the storage and display permissions Android requests.
-4. Open Pegasus. Lucent is installed under `pegasus-frontend/themes/lucent` and selected automatically.
+3. On an AYN Thor, also install `pegasus-lucent-controller.apk`. In Android Accessibility settings, enable **Pegasus Lucent Controller** when prompted.
+4. Open **Pegasus Lucent** once and grant the storage and display permissions Android requests.
+5. Choose **Install / Repair Lucent Theme**, then open Pegasus. Lucent is installed under `pegasus-frontend/themes/lucent` and selected automatically.
+
+On the Thor, a normal press of the square Stop/Select button is passed through unchanged as Select. Holding it continuously for one second closes the active game and restores Pegasus.
 
 The standalone ZIP contains a top-level `lucent` folder. Extract it into `pegasus-frontend/themes/` if you only want the theme.
 
@@ -33,6 +37,7 @@ The standalone ZIP contains a top-level `lucent` folder. Extract it into `pegasu
 
 - `theme/` — Pegasus QML theme and artwork.
 - `android-companion/` — dependency-free Android companion, importer, preview service, media enrichment, and updater.
+- `android-launch-bridge/` — ROM intent bridge and the one-second hold-to-exit controller service.
 - `release-manifest.json` — signed-artifact versions, stable release URLs, and SHA-256 checksums used by the updater.
 
 ## Privacy and safety

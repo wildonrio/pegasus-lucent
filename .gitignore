@@ -1,6 +1,7 @@
 .DS_Store
 *.keystore
 android-companion/build/
+android-launch-bridge/build/
 android-companion/assets/pegasus-lucent-theme.zip
 *.apk
 *.idsig

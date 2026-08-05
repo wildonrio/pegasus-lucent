@@ -84,7 +84,9 @@ public final class PreviewService extends Service {
         super.onCreate();
         importManager = new ImportManager(this);
         updateManager = new UpdateManager(this);
-        ThemeInstaller.installBundledIfNeeded(this);
+        if (ThemeInstaller.hasStorageAccess(this)) {
+            ThemeInstaller.installBundledIfNeeded(this, () -> updateManager.checkAsync(false));
+        }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         NotificationChannel channel = new NotificationChannel(
                 "preview", "Pegasus Lucent", NotificationManager.IMPORTANCE_MIN);
@@ -102,7 +104,6 @@ public final class PreviewService extends Service {
         // fingerprint-throttled, while the updater performs lightweight
         // version checks and only downloads changed artifacts.
         importManager.startInitialScan();
-        updateManager.checkAsync(false);
     }
 
     @Override

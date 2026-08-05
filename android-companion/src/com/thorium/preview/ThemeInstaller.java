@@ -1,6 +1,9 @@
 package com.thorium.preview;
 
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.Manifest;
+import android.os.Build;
 import android.os.Environment;
 import android.util.Log;
 
@@ -32,18 +35,40 @@ final class ThemeInstaller {
 
     private ThemeInstaller() {}
 
+    static boolean hasStorageAccess(Context context) {
+        if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
+        return Build.VERSION.SDK_INT < 23 || context.checkSelfPermission(
+                Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
     static void installBundledIfNeeded(Context context) {
+        installBundledIfNeeded(context, null);
+    }
+
+    static void installBundledIfNeeded(Context context, Runnable completion) {
+        installBundled(context, false, completion);
+    }
+
+    static void forceInstallBundled(Context context, Runnable completion) {
+        installBundled(context, true, completion);
+    }
+
+    private static void installBundled(Context context, boolean force, Runnable completion) {
         Thread worker = new Thread(() -> {
             try {
+                if (!hasStorageAccess(context)) return;
                 String bundled = readAssetText(context, ASSET_VERSION).trim();
-                if (bundled.isEmpty() || bundled.equals(readText(VERSION).trim())) return;
-                try (InputStream input = context.getAssets().open(ASSET_ZIP)) {
-                    installZip(input, bundled);
+                if (!bundled.isEmpty() && (force || !bundled.equals(readText(VERSION).trim()))) {
+                    try (InputStream input = context.getAssets().open(ASSET_ZIP)) {
+                        installZip(input, bundled);
+                    }
                 }
             } catch (java.io.FileNotFoundException missingOptionalAsset) {
                 // Development builds may intentionally omit the large theme bundle.
             } catch (Exception error) {
                 Log.e(TAG, "Unable to install bundled theme", error);
+            } finally {
+                if (completion != null) completion.run();
             }
         }, "lucent-theme-install");
         worker.setDaemon(true);
@@ -62,7 +87,8 @@ final class ThemeInstaller {
         themes.mkdirs();
         File staging = new File(themes, ".lucent-installing");
         deleteTree(staging);
-        staging.mkdirs();
+        if (!staging.mkdirs() && !staging.isDirectory())
+            throw new java.io.IOException("Unable to create the theme staging directory");
         String stagingPath = staging.getCanonicalPath() + File.separator;
         try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(source))) {
             ZipEntry entry;
