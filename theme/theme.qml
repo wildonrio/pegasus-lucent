@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.15"
+    readonly property string lucentVersion: "3.0.16"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -3455,9 +3455,14 @@ FocusScope {
                 Item {
                     id: selectedGameArtPanel
                     x: 0
-                    y: 0
+                    // The Flip's list begins lower to reserve room for PIP,
+                    // but its cover should not begin with that list. Give the
+                    // single-screen cover its own square viewport between the
+                    // sort controls and Android's usable bottom edge. A square
+                    // cover then receives exactly 18 px on all four sides.
+                    y: !root.dualScreenDevice ? -76 : 0
                     width: 600
-                    height: parent.height
+                    height: !root.dualScreenDevice ? 600 : parent.height
                     property real coverAspect: listCover.status === Image.Ready &&
                             listCover.sourceSize.height > 0 ?
                             listCover.sourceSize.width / listCover.sourceSize.height : 0.72
