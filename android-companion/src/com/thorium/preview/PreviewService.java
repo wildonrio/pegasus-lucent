@@ -294,6 +294,9 @@ public final class PreviewService extends Service {
             } else if ("/import/scan".equals(path)) {
                 importManager.startScan();
                 respond(writer, "202 Accepted", importManager.statusJson());
+            } else if ("/import/initial".equals(path)) {
+                importManager.startInitialScan();
+                respond(writer, "202 Accepted", importManager.statusJson());
             } else if ("/import/status".equals(path)) {
                 respond(writer, "200 OK", importManager.statusJson());
             } else if ("/archive/list".equals(path)) {

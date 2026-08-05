@@ -42,6 +42,7 @@ public final class MainActivity extends Activity {
     private TextView permissionStatus;
     private TextView activityStatus;
     private boolean polling;
+    private boolean initialScanRequested;
 
     private final Runnable poller = new Runnable() {
         @Override public void run() {
@@ -66,6 +67,11 @@ public final class MainActivity extends Activity {
         polling = true;
         handler.removeCallbacks(poller);
         handler.post(poller);
+        if (hasLibraryAccess() && !initialScanRequested) {
+            initialScanRequested = true;
+            handler.postDelayed(() -> callService("/import/initial",
+                    "Automatic library discovery started"), 500L);
+        }
     }
 
     @Override protected void onPause() {
@@ -132,14 +138,14 @@ public final class MainActivity extends Activity {
         content.addView(action("OPEN PEGASUS", true, view -> openPegasus()), buttonParams(0));
         content.addView(action("INSTALL / REPAIR LUCENT THEME", false,
                 view -> repairTheme()), buttonParams(dp(10)));
-        content.addView(action("SCAN DOWNLOADS & GAME LIBRARY", false,
-                view -> callService("/import/scan", "Library scan started")), buttonParams(dp(10)));
         content.addView(action("CHECK FOR UPDATES", false,
                 view -> callService("/update/check", "Checking GitHub for updates")), buttonParams(dp(10)));
+        content.addView(action("INSTALL DOWNLOADED UPDATE", false,
+                view -> callService("/update/install", "Opening Android installer")), buttonParams(dp(10)));
         content.addView(action("GRANT LIBRARY ACCESS", false,
                 view -> requestStorageIfNeeded(true)), buttonParams(dp(10)));
 
-        activityStatus = label("Lucent checks for new games and updates whenever its service starts.",
+        activityStatus = label("Lucent scans the complete device automatically after library access is granted.",
                 14, Color.rgb(146, 158, 174));
         activityStatus.setGravity(Gravity.CENTER);
         activityStatus.setLineSpacing(0, 1.15f);
@@ -185,7 +191,10 @@ public final class MainActivity extends Activity {
 
     private void requestStorageIfNeeded(boolean userInitiated) {
         if (hasLibraryAccess()) {
-            if (permissionStatus != null) permissionStatus.setText("Library access granted");
+            if (permissionStatus != null) {
+                permissionStatus.setText("✓  Library access granted");
+                permissionStatus.setTextColor(Color.rgb(113, 230, 176));
+            }
             if (userInitiated) activityStatus.setText("Library access is already granted.");
             return;
         }
@@ -213,15 +222,20 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshStatus() {
-        serviceStatus.setText("Lucent service active");
+        serviceStatus.setText("✓  Lucent service active");
+        serviceStatus.setTextColor(Color.rgb(113, 230, 176));
         File theme = new File(Environment.getExternalStorageDirectory(),
                 "pegasus-frontend/themes/lucent/theme.qml");
         String version = ThemeInstaller.installedVersion();
-        themeStatus.setText(theme.isFile()
-                ? "Theme installed" + (version.isEmpty() ? "" : "  •  version " + version)
-                : "Theme installation pending");
-        permissionStatus.setText(hasLibraryAccess()
-                ? "Library access granted" : "Library access needs approval");
+        boolean installed = theme.isFile();
+        themeStatus.setText(installed
+                ? "✓  Theme installed" + (version.isEmpty() ? "" : "  •  version " + version)
+                : "○  Theme installation pending");
+        themeStatus.setTextColor(installed ? Color.rgb(113, 230, 176) : Color.rgb(240, 184, 92));
+        boolean permitted = hasLibraryAccess();
+        permissionStatus.setText(permitted
+                ? "✓  Library access granted" : "○  Library access needs approval");
+        permissionStatus.setTextColor(permitted ? Color.rgb(113, 230, 176) : Color.rgb(240, 184, 92));
         readServiceStatus("/update/status");
     }
 

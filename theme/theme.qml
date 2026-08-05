@@ -633,14 +633,11 @@ FocusScope {
             liquidGlassEnabled = !liquidGlassEnabled
             api.memory.set("thoriumLiquidGlassEnabled", liquidGlassEnabled)
         } else {
-            // A manual update is intentionally the only scan path after the
-            // initial Pegasus launch. Reset the local state so its progress
-            // and completion notification are visible even after an earlier
-            // successful scan.
             importState = "idle"
             importStatusInitialized = true
             importToastVisible = true
             startImportScan()
+            requestPreviewEndpoint("update/check")
         }
     }
 
@@ -3402,7 +3399,7 @@ FocusScope {
             Text {
                 x: 50
                 y: 94
-                text: "Display changes apply instantly; library updates run only when requested"
+                text: "Display changes apply instantly; updates also run automatically at startup"
                 color: "#9da7b8"
                 font.family: global.fonts.sans
                 font.pixelSize: 17
@@ -3597,7 +3594,7 @@ FocusScope {
                 Text {
                     x: 28
                     y: 22
-                    text: "UPDATE GAME LIBRARY"
+                    text: "UPDATE LIBRARY & LUCENT"
                     color: "white"
                     font.family: global.fonts.sans
                     font.pixelSize: 21
@@ -3607,7 +3604,7 @@ FocusScope {
                 Text {
                     x: 28
                     y: 60
-                    text: "Scan Downloads, repair metadata, and add newly verified games"
+                    text: "Scan games and check GitHub for app and theme updates"
                     color: "#9da7b8"
                     font.family: global.fonts.sans
                     font.pixelSize: 16

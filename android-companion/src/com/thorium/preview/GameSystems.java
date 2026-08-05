@@ -182,7 +182,14 @@ final class GameSystems {
         String ext = extension(file.getName());
         File parent = file.getParentFile();
         for (int depth = 0; parent != null && depth < 6; depth++, parent = parent.getParentFile()) {
-            SystemDef def = BY_ALIAS.get(normalizeAlias(parent.getName()));
+            String hint = normalizeAlias(parent.getName());
+            SystemDef def = BY_ALIAS.get(hint);
+            if (def != null && def.extensions.contains(ext)) return def;
+            if ("pce".equals(hint) && ("chd".equals(ext) || "cue".equals(ext) || "iso".equals(ext)))
+                return BY_FOLDER.get("pcenginecd");
+            hint = hint.replaceFirst("^other", "")
+                    .replaceFirst("(?:roms?|games?)$", "");
+            def = BY_ALIAS.get(hint);
             if (def != null && def.extensions.contains(ext)) return def;
         }
         return null;

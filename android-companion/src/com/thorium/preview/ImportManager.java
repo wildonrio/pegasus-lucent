@@ -93,8 +93,14 @@ final class ImportManager {
     }
 
     void startInitialScan() {
+        if (!ThemeInstaller.hasStorageAccess(context)) {
+            setStatus("permission", 0.0,
+                    "Grant library access to begin the automatic first scan",
+                    Collections.emptyList(), 0, false);
+            return;
+        }
         boolean alreadyDiscovered = context.getSharedPreferences("lucent-library", 0)
-                .getBoolean("fullDiscoveryV1", false);
+                .getBoolean("fullDiscoveryV2", false);
         startScan(!alreadyDiscovered);
     }
 
@@ -113,7 +119,7 @@ final class ImportManager {
                 runScan(fullDiscovery);
                 if (fullDiscovery)
                     context.getSharedPreferences("lucent-library", 0).edit()
-                            .putBoolean("fullDiscoveryV1", true).apply();
+                            .putBoolean("fullDiscoveryV2", true).apply();
             } catch (Throwable error) {
                 Log.e(TAG, "Import failed", error);
                 setStatus("error", 1.0, "Import stopped safely: " + shortError(error),
@@ -373,6 +379,11 @@ final class ImportManager {
             }
         }
         for (File volume : volumes) {
+            // First-run discovery must not depend on user folder naming. Scan
+            // each readable storage volume itself; the recursive scanner only
+            // accepts verified ROM formats and skips Android/app/media trees.
+            if (volume.isDirectory() && volume.canRead())
+                roots.put(canonical(volume.getAbsolutePath()), volume);
             for (String common : new String[]{"Games", "games", "ROMs", "Roms", "roms",
                     "Emulation", "emulation", "RetroArch", "retropie", "recalbox", "batocera"}) {
                 File root = new File(volume, common);
@@ -394,7 +405,14 @@ final class ImportManager {
         return name.startsWith(".") || "android".equals(name) || "download".equals(name) ||
                 "downloads".equals(name) || "pegasusmedia".equals(name) ||
                 "pegasus-frontend".equals(name) || "dcim".equals(name) ||
-                "pictures".equals(name) || "movies".equals(name) || "music".equals(name);
+                "pictures".equals(name) || "movies".equals(name) || "music".equals(name) ||
+                "alarms".equals(name) || "audiobooks".equals(name) ||
+                "notifications".equals(name) || "podcasts".equals(name) ||
+                "recordings".equals(name) || "ringtones".equals(name) ||
+                "pegasusbackups".equals(name) || "pegasusquarantine".equals(name) ||
+                "thorbackups".equals(name) || "dolphinforhandheld".equals(name) ||
+                "retroarch".equals(name) || "winlator".equals(name) ||
+                "citra-emu".equals(name) || "azahar".equals(name);
     }
 
     private static Set<String> existingMetadataPaths() {
@@ -1019,6 +1037,12 @@ final class ImportManager {
             GameSystems.SystemDef system = GameSystems.byFolder(group.getKey());
             if (system == null) continue;
             out.append("\ncollection: ").append(system.collection).append('\n');
+            out.append("shortname: ").append(system.folder).append('\n');
+            String launch = launchCommand(system.folder);
+            if (!launch.isEmpty()) out.append("launch: ").append(launch).append('\n');
+            out.append("files:\n");
+            for (JSONObject row : group.getValue())
+                out.append("  ").append(metadataSafe(row.optString("file"))).append('\n');
             for (JSONObject row : group.getValue()) {
                 out.append("\ngame: ").append(metadataSafe(row.optString("title"))).append('\n');
                 double userScore = row.optDouble("user", 0);
@@ -1095,6 +1119,54 @@ final class ImportManager {
         writeTextAtomic(AUTO_METADATA, out.toString());
     }
 
+    private String launchCommand(String system) {
+        if (("gc".equals(system) || "wii".equals(system)) && installed("org.dolphinemu.dolphinemu"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.dolphinemu.dolphinemu/.ui.main.MainActivity --activity-clear-top";
+        if ("ps2".equals(system)) {
+            if (installed("com.armsx2"))
+                return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                        "-n com.armsx2/.BootSplashActivity --activity-clear-top";
+            if (installed("xyz.aethersx2.android"))
+                return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                        "-n xyz.aethersx2.android/.MainActivity --activity-clear-top";
+        }
+        if ("switch".equals(system) && installed("dev.legacy.eden_emulator"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n dev.legacy.eden_emulator/org.yuzu.yuzu_emu.ui.main.MainActivity --activity-clear-top";
+        if ("wiiu".equals(system) && installed("info.cemu.cemu"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n info.cemu.cemu/.MainActivity --activity-clear-top";
+        if ("psx".equals(system) && installed("com.github.stenzek.duckstation"))
+            return "am start --user 0 -n com.github.stenzek.duckstation/.EmulationActivity " +
+                    "--es bootPath \"{file.path}\" --activity-clear-top";
+        if ("psp".equals(system) && installed("org.ppsspp.ppsspp"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.ppsspp.ppsspp/.PpssppActivity --activity-clear-top";
+        if ("n64".equals(system) && installed("org.mupen64plusae.v3.fzurita.pro"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.mupen64plusae.v3.fzurita.pro/paulscode.android.mupen64plusae.SplashActivity --activity-clear-top";
+        if ("n64".equals(system) && installed("org.mupen64plusae.v3.fzurita"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.mupen64plusae.v3.fzurita/paulscode.android.mupen64plusae.SplashActivity --activity-clear-top";
+        if ("n3ds".equals(system) && installed("org.azahar_emu.azahar"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.azahar_emu.azahar/org.citra.citra_emu.ui.main.MainActivity --activity-clear-top";
+        if ("n3ds".equals(system) && installed("org.citra.citra_emu"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.citra.citra_emu/.ui.main.MainActivity --activity-clear-top";
+        return "";
+    }
+
+    private boolean installed(String packageName) {
+        try {
+            context.getPackageManager().getPackageInfo(packageName, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private static void appendMetadataList(StringBuilder out, String field, JSONArray values) {
         if (values == null) return;
         Set<String> seen = new HashSet<>();
@@ -1143,6 +1215,12 @@ final class ImportManager {
             if ("cso".equals(ext) && starts(head, "CISO".getBytes())) return GameSystems.byFolder("psp");
             if ("pkg".equals(ext) && (starts(head, new byte[]{0x7f,0x50,0x4b,0x47}) || starts(head, "PKG".getBytes()))) return GameSystems.byFolder("ps3");
             if ("wbfs".equals(ext) && starts(head, "WBFS".getBytes())) return GameSystems.byFolder("wii");
+            if ("rvz".equals(ext) && starts(head, "RVZ".getBytes())) {
+                byte[] id = readRange(file, 88, 6);
+                if (id.length == 6 && id[0] == 'G') return GameSystems.byFolder("gc");
+                if (id.length == 6 && (id[0] == 'R' || id[0] == 'S'))
+                    return GameSystems.byFolder("wii");
+            }
             if ("wux".equals(ext) && starts(head, "WUX0".getBytes())) return GameSystems.byFolder("wiiu");
             if ("wua".equals(ext) && (starts(head, "WUA".getBytes()) || starts(head, "ZSTD".getBytes()))) return GameSystems.byFolder("wiiu");
             if ("iso".equals(ext)) return identifyIso(file);

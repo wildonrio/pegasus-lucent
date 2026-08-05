@@ -115,7 +115,10 @@ final class UpdateManager {
             download(manifest.optString("companionApkUrl"), updateFile(), MAX_APK,
                     manifest.optString("companionSha256"));
             setStatus("available", 1,
-                    "Software update downloaded — select Install Update", true, true);
+                    "Software update downloaded — opening Android installer", true, true);
+            // Android still requires its normal confirmation for a signed APK,
+            // but the user never has to browse to Downloads or reinstall by hand.
+            installDownloadedApk();
         } else {
             String message = themeNew ? "Theme updated successfully" :
                     (userInitiated ? "Pegasus Lucent is up to date" : "Updates checked");
