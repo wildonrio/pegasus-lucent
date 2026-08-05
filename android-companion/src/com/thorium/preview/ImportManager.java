@@ -69,6 +69,18 @@ final class ImportManager {
     private static final long MISS_RETRY_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final Pattern HREF = Pattern.compile("href=\"([^\"]+\\.(?:png|jpg|jpeg))\"",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern NINTENDO_TITLE = Pattern.compile(
+            "<title[^>]*>(.*?) for Nintendo Switch(?:[^<]*)</title>",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern NINTENDO_PRODUCT_ASSET = Pattern.compile(
+            "store/software/switch/(\\d{14})/([a-f0-9]{40,64})",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern NINTENDO_SQUARE_COVER = Pattern.compile(
+            "productImage\\([^)]*square[^)]*\\).*?\"url\":\"(https://assets\\.nintendo\\.com/image/fetch/[^\"]+)",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern NINTENDO_GALLERY_ASSET = Pattern.compile(
+            "\\\"publicId\\\":\\\"(/?store/software/switch/[^\\\"]+)\\\",\\\"resourceType\\\":\\\"(video|image)\\\"",
+            Pattern.CASE_INSENSITIVE);
     private static final byte[] GB_LOGO = new byte[]{
             (byte)0xCE,(byte)0xED,0x66,0x66,(byte)0xCC,0x0D,0x00,0x0B,0x03,0x73,0x00,(byte)0x83,
             0x00,0x0C,0x00,0x0D,0x00,0x08,0x11,0x1F,(byte)0x88,(byte)0x89,0x00,0x0E,(byte)0xDC,
@@ -669,7 +681,11 @@ final class ImportManager {
 
     private void enrichBoxArt(ImportedGame game, File cacheRoot, File mediaRoot) {
         try {
-            CatalogMatch match = boxArtMatch(game.system, game.title, cacheRoot);
+            CatalogMatch match = null;
+            NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
+            if (official != null && !official.cover.isEmpty())
+                match = new CatalogMatch(official.cover, game.title);
+            if (match == null) match = boxArtMatch(game.system, game.title, cacheRoot);
             if (match == null) return;
             File folder = new File(mediaRoot, "boxfront/" + game.system.folder);
             folder.mkdirs();
@@ -684,7 +700,12 @@ final class ImportManager {
 
     private void enrichBackground(ImportedGame game, File cacheRoot, File mediaRoot) {
         try {
-            CatalogMatch match = catalogMatch(game.system, game.title, cacheRoot, "Named_Snaps");
+            CatalogMatch match = null;
+            NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
+            if (official != null && !official.background.isEmpty())
+                match = new CatalogMatch(official.background, game.title);
+            if (match == null)
+                match = catalogMatch(game.system, game.title, cacheRoot, "Named_Snaps");
             if (match == null) return;
             File folder = new File(mediaRoot, "background/" + game.system.folder);
             folder.mkdirs();
@@ -705,13 +726,19 @@ final class ImportManager {
                 game.video = existing.getAbsolutePath();
                 return;
             }
-            if (game.system.videoArchive.isEmpty()) return;
-            VideoMatch match = videoMatch(game.system, game.title, cacheRoot);
+            VideoMatch match = null;
+            NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
+            if (official != null && !official.video.isEmpty())
+                match = new VideoMatch(official.video);
+            if (match == null && !game.system.videoArchive.isEmpty())
+                match = videoMatch(game.system, game.title, cacheRoot);
+            if (match == null)
+                match = archiveSearchVideo(game.system, game.title, cacheRoot);
             if (match == null) return;
             File folder = new File(mediaRoot, "internet-archive/" + game.system.folder + "/videos");
             folder.mkdirs();
             File target = new File(folder, safeFilename(game.title) + ".mp4");
-            if (download(match.url, target, 768L * 1024L * 1024L)) game.video = target.getAbsolutePath();
+            if (download(match.url, target, 192L * 1024L * 1024L)) game.video = target.getAbsolutePath();
         } catch (Exception error) {
             Log.w(TAG, "Video unavailable for " + game.title, error);
         }
@@ -1098,6 +1125,108 @@ final class ImportManager {
         return compact.toString();
     }
 
+    private static Set<String> mediaAliases(String title) {
+        Set<String> values = new HashSet<>();
+        String key = normalize(title);
+        values.add(key);
+        values.add(scoreAlias(key));
+        String relaxed = key.replaceAll(
+                        "\\b(?:fan translation|english translation|translation|prototype|beta|demo)\\b",
+                        " ")
+                .replaceAll("\\s+", " ").trim()
+                .replace(" the the ", " the ");
+        values.add(relaxed);
+        values.add(scoreAlias(relaxed));
+        String sourceTitle = cleanTitle(title);
+        int sourceColon = sourceTitle.indexOf(':');
+        if (sourceColon > 3) {
+            String shortTitle = normalize(sourceTitle.substring(0, sourceColon)
+                    .replaceAll(",\\s*(The|A|An)$", ""));
+            if (shortTitle.contains(" ")) {
+                values.add(shortTitle);
+                values.add(scoreAlias(shortTitle));
+            }
+        }
+        if (relaxed.startsWith("castlevania rondo of blood")) {
+            values.add("akumajou dracula x chi no rondo");
+            values.add(scoreAlias("akumajou dracula x chi no rondo"));
+        }
+        if (relaxed.startsWith("the ")) {
+            values.add(relaxed.substring(4));
+            values.add(scoreAlias(relaxed.substring(4)));
+        }
+        return values;
+    }
+
+    private static String nintendoSlug(String title) {
+        switch (normalize(title)) {
+            case "blasphemous ii": return "blasphemous-2-switch";
+            case "mega man 11": return "mega-man-11-switch";
+            case "metroid dread": return "metroid-dread-switch";
+            case "new super mario bros u deluxe": return "new-super-mario-bros-u-deluxe-switch";
+            case "prince of persia the lost crown":
+                return "prince-of-persia-the-lost-crown-switch";
+            case "super mario 3d world bowsers fury":
+                return "super-mario-3d-world-plus-bowsers-fury-switch";
+            case "the legend of zelda links awakening":
+                return "the-legend-of-zelda-links-awakening-switch";
+            default:
+                String slug = normalize(title).replace(' ', '-');
+                return slug.isEmpty() ? "" : slug + "-switch";
+        }
+    }
+
+    private static boolean nintendoTitlesEquivalent(String requested, String official) {
+        String left = scoreAlias(normalize(requested));
+        String right = scoreAlias(normalize(official.replace("&trade;", "")
+                .replace("&reg;", "").replace("&#39;", "'")
+                .replace("™", "").replace("®", "").replace("©", "")));
+        return left.equals(right);
+    }
+
+    private static int archiveCandidateScore(String requested, GameSystems.SystemDef system,
+                                             String candidateTitle) {
+        String candidate = normalize(candidateTitle);
+        String compactCandidate = scoreAlias(candidate);
+        String lower = " " + candidateTitle.toLowerCase(Locale.US) + " ";
+        String[] rejected = new String[]{"soundtrack", " ost ", "music", "podcast", "reaction",
+                "speedrun", "tournament", "walkthrough", "longplay", "let s play", "parody",
+                "ending", "mod showcase", "full game"};
+        for (String token : rejected) if (lower.contains(token)) return -1000;
+        if (!normalize(requested).contains(" vs ") && lower.matches(".*\\bvs\\b.*"))
+            return -1000;
+        if (lower.contains("disaster")) return -1000;
+        if (lower.matches(".*\\bin\\s+\\d{1,3}:\\d{2}.*")) return -1000;
+        int score = 0;
+        for (String alias : mediaAliases(requested)) {
+            if (alias.isEmpty()) continue;
+            if (candidate.equals(alias)) score = Math.max(score, 140);
+            else if (candidate.contains(alias)) score = Math.max(score, 115);
+            String compact = scoreAlias(alias);
+            if (!compact.isEmpty() && compactCandidate.contains(compact))
+                score = Math.max(score, 110);
+        }
+        if (score == 0) return -1000;
+        String[] preferred = new String[]{"official", "trailer", "gameplay", "intro",
+                "commercial", "review", "in brief", "in breif"};
+        for (String token : preferred) if (lower.contains(token)) score += 4;
+        if (system != null) {
+            String platform = normalize(system.collection);
+            if (!platform.isEmpty() && candidate.contains(platform)) score += 8;
+        }
+        return score;
+    }
+
+    private static String jsonUnescape(String value) {
+        if (value == null) return "";
+        return value.replace("\\u0026", "&").replace("\\/", "/");
+    }
+
+    private static long parseLong(String value) {
+        try { return Long.parseLong(value); }
+        catch (Exception ignored) { return 0L; }
+    }
+
     private static boolean missingMediaFile(String path) {
         return path == null || path.isEmpty() || !new File(path).isFile();
     }
@@ -1186,14 +1315,13 @@ final class ImportManager {
         String html = cachedText(cache,
                 "https://thumbnails.libretro.com/" + encodePath(system.libretro) + "/" + category + "/",
                 7L * 24L * 60L * 60L * 1000L, 32L * 1024L * 1024L);
-        String key = normalize(title);
-        String alias = scoreAlias(key);
+        Set<String> keys = mediaAliases(title);
         List<String> exact = new ArrayList<>();
         Matcher matcher = HREF.matcher(html);
         while (matcher.find()) {
             String href = matcher.group(1);
             String candidate = normalize(stem(decode(href)));
-            if (candidate.equals(key) || scoreAlias(candidate).equals(alias)) exact.add(href);
+            if (keys.contains(candidate) || keys.contains(scoreAlias(candidate))) exact.add(href);
         }
         if (exact.isEmpty()) return null;
         exact.sort((left, right) -> Integer.compare(regionRank(left), regionRank(right)));
@@ -1239,6 +1367,149 @@ final class ImportManager {
             base = "https://" + root.optString("d1") + root.optString("dir") + "/";
         else base = "https://archive.org/download/" + system.videoArchive + "/";
         return new VideoMatch(base + encodeHref(selected));
+    }
+
+    /**
+     * Nintendo's own product pages provide an exact cover, full-width gallery
+     * images, and MP4 gallery videos. This is both more accurate and more
+     * resilient for Switch than treating a single community archive as the
+     * entire catalog. A page is accepted only when its title matches the ROM.
+     */
+    private NintendoMedia nintendoMedia(GameSystems.SystemDef system, String title, File cacheRoot) {
+        if (system == null || !"switch".equals(system.folder)) return null;
+        String slug = nintendoSlug(title);
+        if (slug.isEmpty()) return null;
+        try {
+            File cache = new File(cacheRoot, "nintendo/" + slug + ".html");
+            String html = cachedText(cache,
+                    "https://www.nintendo.com/us/store/products/" + slug + "/",
+                    30L * 24L * 60L * 60L * 1000L, 4L * 1024L * 1024L);
+            Matcher titleMatcher = NINTENDO_TITLE.matcher(html);
+            if (!titleMatcher.find() || !nintendoTitlesEquivalent(title, titleMatcher.group(1)))
+                return null;
+
+            // The first Nintendo software asset belongs to the primary product
+            // (the rest of this large page may contain many cross-sells). Its
+            // NSUID lets us reject every unrelated gallery item precisely.
+            Matcher productAsset = NINTENDO_PRODUCT_ASSET.matcher(html);
+            if (!productAsset.find()) return null;
+            String productId = productAsset.group(1);
+            String coverHash = productAsset.group(2);
+            String cover = "https://assets.nintendo.com/image/upload/q_auto/f_auto/" +
+                    "store/software/switch/" + productId + "/" + coverHash;
+            String background = "", video = "";
+
+            String decoded = html.replace("\\\"", "\"");
+            String sku = "71" + productId.substring(6);
+            int productAt = decoded.indexOf("Product:{\"sku\":\"" + sku +
+                    "\"}\":{\"__typename\":\"Product\"");
+            if (productAt >= 0) {
+                int productEnd = Math.min(decoded.length(), productAt + 250_000);
+                Matcher square = NINTENDO_SQUARE_COVER.matcher(
+                        decoded.substring(productAt, productEnd));
+                if (square.find()) cover = jsonUnescape(square.group(1));
+            }
+            Matcher asset = NINTENDO_GALLERY_ASSET.matcher(decoded);
+            while (asset.find()) {
+                String publicId = asset.group(1);
+                if (publicId.startsWith("/")) publicId = publicId.substring(1);
+                if (!publicId.contains("/" + productId + "/")) continue;
+                String type = asset.group(2).toLowerCase(Locale.US);
+                if ("video".equals(type) && video.isEmpty())
+                    video = "https://assets.nintendo.com/video/upload/q_auto/f_auto/" +
+                            publicId + ".mp4";
+                else if ("image".equals(type) && background.isEmpty() &&
+                        !publicId.endsWith("/" + coverHash))
+                    background = "https://assets.nintendo.com/image/upload/q_auto:best/f_auto/" +
+                            publicId;
+            }
+            if (cover.isEmpty() && background.isEmpty() && video.isEmpty()) return null;
+            return new NintendoMedia(cover, background, video);
+        } catch (Exception error) {
+            Log.w(TAG, "Official Nintendo media unavailable for " + title, error);
+            return null;
+        }
+    }
+
+    private VideoMatch archiveSearchVideo(GameSystems.SystemDef system, String title, File cacheRoot) {
+        try {
+            String queryTitle = cleanTitle(title)
+                    .replaceAll("\\([^)]*\\)|\\[[^]]*]", " ")
+                    .replaceAll("\\s+", " ").trim();
+            int queryColon = queryTitle.indexOf(':');
+            if (queryColon > 3) {
+                String shortQuery = queryTitle.substring(0, queryColon)
+                        .replaceAll(",\\s*(The|A|An)$", "");
+                if (normalize(shortQuery).contains(" ")) queryTitle = shortQuery;
+            }
+            String query = "title:(\"" + queryTitle + "\") AND mediatype:(movies)";
+            String url = "https://archive.org/advancedsearch.php?q=" +
+                    URLEncoder.encode(query, "UTF-8") +
+                    "&fl%5B%5D=identifier&fl%5B%5D=title&rows=75&page=1&output=json";
+            File cache = new File(cacheRoot, "archive-search-v3/" + system.folder + "/" +
+                    sha1(normalize(title)) + ".json");
+            JSONObject root = new JSONObject(cachedText(cache, url,
+                    14L * 24L * 60L * 60L * 1000L, 4L * 1024L * 1024L));
+            JSONObject response = root.optJSONObject("response");
+            JSONArray docs = response == null ? null : response.optJSONArray("docs");
+            if (docs == null) return null;
+            List<JSONObject> ranked = new ArrayList<>();
+            for (int i = 0; i < docs.length(); i++) {
+                JSONObject doc = docs.optJSONObject(i);
+                if (doc != null) ranked.add(doc);
+            }
+            ranked.sort((left, right) -> Integer.compare(
+                    archiveCandidateScore(title, system,
+                            right.optString("title") + " " + right.optString("identifier")),
+                    archiveCandidateScore(title, system,
+                            left.optString("title") + " " + left.optString("identifier"))));
+            // A high-scoring Archive item can still contain no usable MP4 (or
+            // only a multi-gigabyte longplay). Keep trying the remaining exact
+            // candidates instead of treating that first dead end as final.
+            for (JSONObject candidate : ranked) {
+                int score = archiveCandidateScore(title, system,
+                        candidate.optString("title") + " " + candidate.optString("identifier"));
+                if (score < 90) break;
+                VideoMatch match = archiveItemVideo(candidate.optString("identifier"), cacheRoot);
+                if (match != null) return match;
+            }
+            return null;
+        } catch (Exception error) {
+            Log.w(TAG, "Archive fallback unavailable for " + title, error);
+            return null;
+        }
+    }
+
+    private VideoMatch archiveItemVideo(String identifier, File cacheRoot) throws Exception {
+        if (identifier == null || identifier.isEmpty()) return null;
+        File metadataCache = new File(cacheRoot, "archive-items/" + sha1(identifier) + ".json");
+        JSONObject metadata = new JSONObject(cachedText(metadataCache,
+                "https://archive.org/metadata/" + encodePath(identifier),
+                30L * 24L * 60L * 60L * 1000L, 16L * 1024L * 1024L));
+        JSONArray files = metadata.optJSONArray("files");
+        if (files == null) return null;
+        String selected = "";
+        int selectedQuality = Integer.MIN_VALUE;
+        for (int i = 0; i < files.length(); i++) {
+            JSONObject file = files.optJSONObject(i);
+            String name = file == null ? "" : file.optString("name");
+            String lower = name.toLowerCase(Locale.US);
+            if (!lower.endsWith(".mp4") || lower.contains("sample") ||
+                    lower.contains("thumb") || lower.contains("spectrogram")) continue;
+            long size = parseLong(file.optString("size"));
+            if (size > 0 && (size < 256L * 1024L || size > 192L * 1024L * 1024L)) continue;
+            String format = file.optString("format").toLowerCase(Locale.US);
+            int quality = 0;
+            if (lower.contains("720") || lower.contains("1080")) quality += 25;
+            if (format.contains("h.264") || format.contains("mpeg4")) quality += 20;
+            if (lower.contains("512kb")) quality += 8;
+            if (lower.endsWith(".ia.mp4")) quality -= 5;
+            if (size > 0) quality += Math.min(20, (int)(size / (8L * 1024L * 1024L)));
+            if (quality > selectedQuality) { selectedQuality = quality; selected = name; }
+        }
+        if (selected.isEmpty()) return null;
+        return new VideoMatch("https://archive.org/download/" + encodePath(identifier) + "/" +
+                encodeHref(selected));
     }
 
     private void writeMetadata(JSONArray registry) throws Exception {
@@ -1736,6 +2007,16 @@ final class ImportManager {
         final String url;
         VideoMatch(String url) { this.url = url; }
     }
+    private static final class NintendoMedia {
+        final String cover;
+        final String background;
+        final String video;
+        NintendoMedia(String cover, String background, String video) {
+            this.cover = cover == null ? "" : cover;
+            this.background = background == null ? "" : background;
+            this.video = video == null ? "" : video;
+        }
+    }
     private static final class GameRankingsRecord {
         final double score;
         final int reviews;
@@ -1809,8 +2090,9 @@ final class ImportManager {
     }
     private static String extension(String name) {
         int query = name.indexOf('?'); if (query >= 0) name = name.substring(0, query);
+        int slash = name.lastIndexOf('/');
         int dot = name.lastIndexOf('.');
-        return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.US);
+        return dot < 0 || dot < slash ? "" : name.substring(dot + 1).toLowerCase(Locale.US);
     }
     private static String stem(String name) {
         int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf(File.separatorChar));
