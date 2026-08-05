@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.17"
+    readonly property string lucentVersion: "3.0.18"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -382,7 +382,9 @@ FocusScope {
 
     function artwork(game) {
         if (!game) return ""
-        return game.assets.background || game.assets.screenshot || game.assets.boxFront || ""
+        // Never promote a capture or portrait cover into the wallpaper layer.
+        // Missing real fanart falls through to the console backdrop underneath.
+        return game.assets.background || ""
     }
 
     function chooseSystemWallpaper(index) {
@@ -398,10 +400,9 @@ FocusScope {
         if (page === "home" && homeZone === 0)
             return ""
         if (!activeGame) return ""
-        // Never replace a game's identity with generic system hardware.  Real
-        // fan art remains first choice, then gameplay, then its retail cover.
-        return activeGame.assets.background || activeGame.assets.screenshot ||
-                activeGame.assets.boxFront || ""
+        // Only provider-labeled/vision-audited background art belongs here.
+        // The system backdrop remains visible when no genuine wallpaper exists.
+        return activeGame.assets.background || ""
     }
 
     function upperArtworkLayer(slot) {
@@ -2740,21 +2741,22 @@ FocusScope {
                 anchors.right: searchControl.left
                 anchors.rightMargin: 14
                 anchors.verticalCenter: parent.verticalCenter
-                width: 168
+                width: 44
                 height: 40
                 color: root.settingsOpen ? root.accent : "#b3090d14"
                 border.width: 1
                 border.color: root.settingsOpen ? Qt.lighter(root.accent, 1.18) : "#4cffffff"
                 radius: 20
 
-                Text {
+                Image {
                     anchors.centerIn: parent
-                    text: "LUCENT SETTINGS"
-                    color: root.settingsOpen ? "#05070b" : "#eef1f6"
-                    font.family: global.fonts.sans
-                    font.pixelSize: 14
-                    font.weight: Font.Bold
-                    font.letterSpacing: 0.7
+                    width: 23
+                    height: 23
+                    source: Qt.resolvedUrl("assets/settings-gear.svg")
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    mipmap: true
+                    opacity: root.settingsOpen ? 0.72 : 1.0
                 }
 
                 MouseArea {
@@ -3655,7 +3657,7 @@ FocusScope {
         anchors.rightMargin: 62
         y: 1040
         visible: root.page === "home" && !root.settingsOpen
-        text: "X / Y  LUCENT SETTINGS     D-PAD  NAVIGATE     A  OPEN"
+        text: "D-PAD  NAVIGATE     A  OPEN"
         color: "#7f899c"
         font.family: global.fonts.sans
         font.pixelSize: 15

@@ -830,22 +830,13 @@ final class ImportManager {
                 game.background = pipeline.getAbsolutePath();
                 return;
             }
-            CatalogMatch match = null;
-            NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
-            if (official != null && !official.background.isEmpty())
-                match = new CatalogMatch(official.background, game.title);
-            // Never use gameplay screenshots as wallpapers. If a provider has
-            // no actual promotional/fan-art background, leave this unset for
-            // the wallpaper pipeline instead of disguising a game capture as
-            // a backdrop.
-            if (match == null) return;
-            File folder = new File(mediaRoot, "background/" + game.system.folder);
-            folder.mkdirs();
-            String ext = extension(match.url);
-            File target = new File(folder, sha1(game.rom.getAbsolutePath()) + "." +
-                    (ext.isEmpty() ? "png" : ext));
-            if (download(match.url, target, 64L * 1024L * 1024L))
-                game.background = target.getAbsolutePath();
+            // Nintendo gallery images and legacy catalog "backgrounds" are
+            // frequently raw gameplay captures. Only the offline pipeline's
+            // provider-labeled and vision-reviewed fanart is accepted here.
+            // Leave the field unset when no approved pipeline image exists so
+            // the theme can show its console backdrop instead.
+            game.background = "";
+            return;
         } catch (Exception error) {
             Log.w(TAG, "Wallpaper unavailable for " + game.title, error);
         }
