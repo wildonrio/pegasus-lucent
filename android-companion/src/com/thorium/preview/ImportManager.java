@@ -1,6 +1,11 @@
 package com.thorium.preview;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.os.Environment;
 import android.os.SystemClock;
 import android.util.Log;
@@ -61,6 +66,10 @@ final class ImportManager {
     private static final File PEGASUS_CONFIG = new File(Environment.getExternalStorageDirectory(),
             "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
     private static final File REGISTRY = new File(PEGASUS, "thorium-imports.json");
+    private static final String BACKGROUND_SOURCE_WALLPAPER = "audited-wallpaper";
+    private static final String BACKGROUND_SOURCE_OFFICIAL = "official-gallery-image";
+    private static final String BACKGROUND_SOURCE_SCREENSHOT = "exact-gameplay-screenshot";
+    private static final String BACKGROUND_TRANSFORM = "center-crop-1920x1080-no-stretch";
     private static final File AUTO_METADATA = new File(new File(PEGASUS_CONFIG, "metafiles"),
             "99-lucent-auto-import.metadata.pegasus.txt");
     private static final File LEGACY_AUTO_METADATA = new File(PEGASUS,
@@ -485,6 +494,12 @@ final class ImportManager {
             }
         }
 
+        // Publish provenance before the potentially long full-library media
+        // audit, then refresh it again after the audit below. A process kill
+        // can delay later repairs but cannot make completed screenshot
+        // fallbacks anonymous.
+        writeBackgroundProvenanceManifest(readRegistry(), mediaRoot);
+
         setStatus("artwork", 0.93,
                 "Auditing the full library for missing covers, wallpapers, and videos…",
                 titles, imported.size(), !imported.isEmpty());
@@ -493,6 +508,12 @@ final class ImportManager {
         setStatus("scores", 0.97, "Filling historical GameRankings critic scores…",
                 titles, imported.size(), !imported.isEmpty() || repaired > 0);
         int scoreRepairs = repairMissingScores();
+
+        // The registry is the durable source of truth; this compact manifest
+        // is the human/tool-friendly audit surface. It is regenerated after
+        // every update scan so screenshots never become indistinguishable
+        // from genuine wallpaper merely because both fields are populated.
+        writeBackgroundProvenanceManifest(readRegistry(), mediaRoot);
 
         int mediaGapGames = 0;
         for (ImportedGame game : mediaRepairs)
@@ -828,18 +849,115 @@ final class ImportManager {
             }
             if (pipeline.isFile() && pipeline.length() > 512) {
                 game.background = pipeline.getAbsolutePath();
+                if (game.backgroundSource.isEmpty())
+                    game.backgroundSource = BACKGROUND_SOURCE_WALLPAPER;
                 return;
             }
-            // Nintendo gallery images and legacy catalog "backgrounds" are
-            // frequently raw gameplay captures. Only the offline pipeline's
-            // provider-labeled and vision-reviewed fanart is accepted here.
-            // Leave the field unset when no approved pipeline image exists so
-            // the theme can show its console backdrop instead.
+
+            // Prefer an exact, first-party gallery image before falling back
+            // to gameplay. The Nintendo adapter validates the product title
+            // and NSUID, so cross-title artwork can never leak into a game.
+            NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
+            if (official != null && !official.background.isEmpty()) {
+                File folder = new File(mediaRoot,
+                        "game-wallpapers-official-gallery/" + game.system.folder);
+                File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
+                if (downloadAndCrop16x9(official.background, target, cacheRoot,
+                        64L * 1024L * 1024L)) {
+                    game.background = target.getAbsolutePath();
+                    game.backgroundSource = BACKGROUND_SOURCE_OFFICIAL;
+                    game.backgroundSourceUrl = official.background;
+                    game.backgroundTransform = BACKGROUND_TRANSFORM;
+                    return;
+                }
+            }
+
+            // Last resort: an exact-title libretro gameplay snap. It is kept
+            // in a dedicated tree and tagged in both registry and Pegasus
+            // metadata, so it can always be audited or replaced separately
+            // from real wallpaper. catalogMatch rejects fuzzy/cross-platform
+            // matches and chooses region variants deterministically.
+            CatalogMatch screenshot = catalogMatch(game.system, game.title, cacheRoot,
+                    "Named_Snaps");
+            if (screenshot != null) {
+                File folder = new File(mediaRoot,
+                        "game-wallpapers-screenshot-fallback/" + game.system.folder);
+                File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
+                if (downloadAndCrop16x9(screenshot.url, target, cacheRoot,
+                        64L * 1024L * 1024L)) {
+                    game.background = target.getAbsolutePath();
+                    game.backgroundSource = BACKGROUND_SOURCE_SCREENSHOT;
+                    game.backgroundSourceUrl = screenshot.url;
+                    game.backgroundTransform = BACKGROUND_TRANSFORM;
+                    return;
+                }
+            }
+
+            // An empty field is intentional: the theme shows a neutral system
+            // backdrop rather than retaining the previous game's wallpaper.
             game.background = "";
+            game.backgroundSource = "";
+            game.backgroundSourceUrl = "";
+            game.backgroundTransform = "";
             return;
         } catch (Exception error) {
             Log.w(TAG, "Wallpaper unavailable for " + game.title, error);
         }
+    }
+
+    private static boolean downloadAndCrop16x9(String url, File target, File cacheRoot,
+                                                long maxBytes) throws Exception {
+        if (isExact1080p(target)) return true;
+        File source = new File(cacheRoot, "background-sources/" + sha1(url) + ".image");
+        if (!download(url, source, maxBytes)) return false;
+
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
+        if (bounds.outWidth < 1 || bounds.outHeight < 1) return false;
+
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        int sample = 1;
+        while (bounds.outWidth / (sample * 2) >= 1920 &&
+                bounds.outHeight / (sample * 2) >= 1080) sample *= 2;
+        decode.inSampleSize = sample;
+        Bitmap input = BitmapFactory.decodeFile(source.getAbsolutePath(), decode);
+        if (input == null) return false;
+
+        Bitmap output = null;
+        File part = new File(target.getAbsolutePath() + ".part");
+        try {
+            output = Bitmap.createBitmap(1920, 1080, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(output);
+            float scale = Math.max(1920f / input.getWidth(), 1080f / input.getHeight());
+            float width = input.getWidth() * scale;
+            float height = input.getHeight() * scale;
+            RectF destination = new RectF((1920f - width) / 2f, (1080f - height) / 2f,
+                    (1920f + width) / 2f, (1080f + height) / 2f);
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG |
+                    Paint.DITHER_FLAG);
+            canvas.drawBitmap(input, null, destination, paint);
+            target.getParentFile().mkdirs();
+            try (FileOutputStream stream = new FileOutputStream(part)) {
+                if (!output.compress(Bitmap.CompressFormat.JPEG, 92, stream)) return false;
+                stream.getFD().sync();
+            }
+            if (target.exists() && !target.delete()) return false;
+            return part.renameTo(target) && isExact1080p(target);
+        } finally {
+            if (output != null) output.recycle();
+            input.recycle();
+            if (part.exists() && !target.equals(part)) part.delete();
+        }
+    }
+
+    private static boolean isExact1080p(File file) {
+        if (file == null || !file.isFile() || file.length() <= 512) return false;
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+        return bounds.outWidth == 1920 && bounds.outHeight == 1080;
     }
 
     private void enrichVideo(ImportedGame game, File cacheRoot, File mediaRoot) {
@@ -1399,6 +1517,10 @@ final class ImportManager {
                     game.boxArt = artPath;
                     game.background = backgroundPath;
                     game.video = videoPath;
+                    game.backgroundSource = field(stanza, "x-background-source");
+                    game.backgroundSourceUrl = field(stanza, "x-background-source-url");
+                    game.backgroundTransform = field(stanza, "x-background-transform");
+                    game.inferBackgroundProvenance();
 
                     if (needsArt && !recentlyMissed(cacheRoot, system, title)) {
                         enrichBoxArt(game, cacheRoot, mediaRoot);
@@ -1414,8 +1536,16 @@ final class ImportManager {
                         repaired++;
                     }
                     if (needsBackground && !missingMediaFile(game.background)) {
-                        updated = removeField(updated, "assets.background").trim() +
-                                "\nassets.background: " + game.background;
+                        updated = removeField(updated, "assets.background");
+                        updated = removeField(updated, "x-background-source");
+                        updated = removeField(updated, "x-background-source-url");
+                        updated = removeField(updated, "x-background-transform").trim() +
+                                "\nassets.background: " + game.background +
+                                "\nx-background-source: " + game.backgroundSource;
+                        if (!game.backgroundSourceUrl.isEmpty())
+                            updated += "\nx-background-source-url: " + game.backgroundSourceUrl;
+                        if (!game.backgroundTransform.isEmpty())
+                            updated += "\nx-background-transform: " + game.backgroundTransform;
                         repaired++;
                     }
                     if (needsVideo && !missingMediaFile(game.video)) {
@@ -1817,6 +1947,15 @@ final class ImportManager {
                     out.append("assets.boxFront: ").append(metadataSafe(row.optString("boxArt"))).append('\n');
                 if (!row.optString("background").isEmpty())
                     out.append("assets.background: ").append(metadataSafe(row.optString("background"))).append('\n');
+                if (!row.optString("backgroundSource").isEmpty())
+                    out.append("x-background-source: ")
+                            .append(metadataSafe(row.optString("backgroundSource"))).append('\n');
+                if (!row.optString("backgroundSourceUrl").isEmpty())
+                    out.append("x-background-source-url: ")
+                            .append(metadataSafe(row.optString("backgroundSourceUrl"))).append('\n');
+                if (!row.optString("backgroundTransform").isEmpty())
+                    out.append("x-background-transform: ")
+                            .append(metadataSafe(row.optString("backgroundTransform"))).append('\n');
                 if (!row.optString("video").isEmpty())
                     out.append("assets.video: ").append(metadataSafe(row.optString("video"))).append('\n');
             }
@@ -1887,10 +2026,14 @@ final class ImportManager {
                     row.put("file", path);
                     row.put("boxArt", field(stanza, "assets.boxFront"));
                     row.put("background", field(stanza, "assets.background"));
+                    row.put("backgroundSource", field(stanza, "x-background-source"));
+                    row.put("backgroundSourceUrl", field(stanza, "x-background-source-url"));
+                    row.put("backgroundTransform", field(stanza, "x-background-transform"));
                     row.put("video", field(stanza, "assets.video"));
                     row.put("enrichmentVersion", 2);
                     row.put("archived", false);
                     row.put("forceInclude", false);
+                    ensureBackgroundProvenance(row);
                     registry.put(row);
                     registryPaths.add(canonicalPath);
                     addedRows = true;
@@ -1925,10 +2068,41 @@ final class ImportManager {
                 // an auto metafile from a thinner registry and erase them.
                 putStringIfMissing(row, "boxArt", field(stanza, "assets.boxFront"));
                 putStringIfMissing(row, "background", field(stanza, "assets.background"));
+                putStringIfMissing(row, "backgroundSource", field(stanza, "x-background-source"));
+                putStringIfMissing(row, "backgroundSourceUrl", field(stanza, "x-background-source-url"));
+                putStringIfMissing(row, "backgroundTransform", field(stanza, "x-background-transform"));
                 putStringIfMissing(row, "video", field(stanza, "assets.video"));
+                if (ensureBackgroundProvenance(row)) addedRows = true;
             } catch (Exception ignored) {}
         }
         return addedRows;
+    }
+
+    private static boolean ensureBackgroundProvenance(JSONObject row) {
+        String background = row.optString("background");
+        if (background.isEmpty() || !row.optString("backgroundSource").isEmpty()) return false;
+        String source = inferBackgroundSource(background);
+        try {
+            row.put("backgroundSource", source);
+            if ((BACKGROUND_SOURCE_SCREENSHOT.equals(source) ||
+                    BACKGROUND_SOURCE_OFFICIAL.equals(source)) &&
+                    row.optString("backgroundTransform").isEmpty())
+                row.put("backgroundTransform", BACKGROUND_TRANSFORM);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static String inferBackgroundSource(String background) {
+        String normalized = background.replace('\\', '/').toLowerCase(Locale.US);
+        if (normalized.contains("/game-wallpapers-screenshot-fallback/"))
+            return BACKGROUND_SOURCE_SCREENSHOT;
+        if (normalized.contains("/game-wallpapers-official-gallery/"))
+            return BACKGROUND_SOURCE_OFFICIAL;
+        if (normalized.contains("/game-wallpapers/"))
+            return BACKGROUND_SOURCE_WALLPAPER;
+        return "unclassified-existing-background";
     }
 
     private static void putNumericIfMissing(JSONObject row, String key, String raw, double scale) {
@@ -1948,7 +2122,8 @@ final class ImportManager {
         int score = 0;
         String[] valuable = {"x-critic", "x-user-score", "release", "x-gamefaqs-user",
                 "x-gamerankings-score", "x-mobygames-critic", "x-metacritic-critic",
-                "assets.boxFront", "assets.background", "assets.video"};
+                "assets.boxFront", "assets.background", "x-background-source",
+                "x-background-source-url", "assets.video"};
         for (String name : valuable)
             if (!field(stanza, name).isEmpty()) score++;
         return score;
@@ -2161,6 +2336,60 @@ final class ImportManager {
         } catch (Exception ignored) { return new JSONArray(); }
     }
 
+    private static void writeBackgroundProvenanceManifest(JSONArray registry, File mediaRoot) {
+        LinkedHashMap<String, JSONObject> byRomPath = new LinkedHashMap<>();
+        try {
+            for (int index = 0; index < registry.length(); index++) {
+                JSONObject row = registry.optJSONObject(index);
+                if (row == null || row.optString("background").isEmpty()) continue;
+                ensureBackgroundProvenance(row);
+                putBackgroundProvenance(byRomPath, row.optString("file"),
+                        row.optString("system"), row.optString("title"),
+                        row.optString("background"), row.optString("backgroundSource"),
+                        row.optString("backgroundSourceUrl"),
+                        row.optString("backgroundTransform"));
+            }
+            // Include hand-authored/core collection metadata too. Registry
+            // rows cover automatic imports, while Pegasus metafiles are the
+            // final source of truth for the owner's entire collection.
+            for (File metadata : metadataFiles()) {
+                for (String stanza : splitStanzas(readText(metadata))) {
+                    String romPath = field(stanza, "file");
+                    String background = field(stanza, "assets.background");
+                    if (romPath.isEmpty() || background.isEmpty()) continue;
+                    GameSystems.SystemDef system = systemFromRomPath(romPath);
+                    putBackgroundProvenance(byRomPath, romPath,
+                            system == null ? "" : system.folder, field(stanza, "game"),
+                            background, field(stanza, "x-background-source"),
+                            field(stanza, "x-background-source-url"),
+                            field(stanza, "x-background-transform"));
+                }
+            }
+            JSONArray records = new JSONArray();
+            for (JSONObject record : byRomPath.values()) records.put(record);
+            writeJsonAtomic(new File(mediaRoot, "background-provenance.json"), records);
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to write background provenance manifest", error);
+        }
+    }
+
+    private static void putBackgroundProvenance(Map<String, JSONObject> records,
+            String romPath, String system, String title, String background, String source,
+            String sourceUrl, String transform) throws Exception {
+        if (romPath.isEmpty() || background.isEmpty()) return;
+        if (source.isEmpty()) source = inferBackgroundSource(background);
+        JSONObject record = new JSONObject();
+        record.put("romPath", romPath);
+        record.put("system", system);
+        record.put("title", cleanTitle(title));
+        record.put("backgroundPath", background);
+        record.put("source", source);
+        record.put("sourceUrl", sourceUrl);
+        record.put("transform", transform);
+        record.put("filePresent", new File(background).isFile());
+        records.put(canonical(romPath), record);
+    }
+
     private static Set<String> registeredSources(JSONArray registry) {
         Set<String> result = new HashSet<>();
         for (int i = 0; i < registry.length(); i++) {
@@ -2242,6 +2471,9 @@ final class ImportManager {
         final File rom;
         String boxArt = "";
         String background = "";
+        String backgroundSource = "";
+        String backgroundSourceUrl = "";
+        String backgroundTransform = "";
         String video = "";
         String release = "";
         String metacriticSlug = "";
@@ -2283,6 +2515,10 @@ final class ImportManager {
                     value.optString("sourceIdentity"), cleanTitle(value.optString("title")), rom);
             game.boxArt = value.optString("boxArt");
             game.background = value.optString("background");
+            game.backgroundSource = value.optString("backgroundSource");
+            game.backgroundSourceUrl = value.optString("backgroundSourceUrl");
+            game.backgroundTransform = value.optString("backgroundTransform");
+            game.inferBackgroundProvenance();
             game.video = value.optString("video");
             game.release = value.optString("release");
             game.metacriticSlug = value.optString("metacriticSlug");
@@ -2323,6 +2559,9 @@ final class ImportManager {
                 value.put("sourceIdentity", sourceIdentity); value.put("system", system.folder);
                 value.put("title", title); value.put("file", rom.getAbsolutePath());
                 value.put("boxArt", boxArt); value.put("background", background);
+                value.put("backgroundSource", backgroundSource);
+                value.put("backgroundSourceUrl", backgroundSourceUrl);
+                value.put("backgroundTransform", backgroundTransform);
                 value.put("video", video);
                 value.put("user", user); value.put("critic", critic);
                 value.put("metacriticUser", metacriticUser);
@@ -2347,6 +2586,14 @@ final class ImportManager {
                 value.put("publishers", new JSONArray(publishers));
             } catch (Exception ignored) {}
             return value;
+        }
+
+        void inferBackgroundProvenance() {
+            if (background.isEmpty() || !backgroundSource.isEmpty()) return;
+            backgroundSource = inferBackgroundSource(background);
+            if ((BACKGROUND_SOURCE_SCREENSHOT.equals(backgroundSource) ||
+                    BACKGROUND_SOURCE_OFFICIAL.equals(backgroundSource)) &&
+                    backgroundTransform.isEmpty()) backgroundTransform = BACKGROUND_TRANSFORM;
         }
     }
 

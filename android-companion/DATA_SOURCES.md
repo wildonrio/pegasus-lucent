@@ -18,3 +18,19 @@ It does not fuzzy-match a ROM to another port or similarly named game.
 The displayed critic score is a 1.0–10.0 composite weighted by the documented
 review count for each available professional source. User scores are normalized
 separately and never substituted for missing critic data.
+
+## Background provenance and fallback order
+
+Every update scan records where each background came from. The importer uses
+this order and never borrows media from a different title or platform:
+
+1. A pre-audited wallpaper in `PegasusMedia/game-wallpapers`.
+2. An exact first-party product-gallery image when an official provider exists.
+3. An exact-title libretro `Named_Snaps` gameplay screenshot as the last resort.
+
+Screenshot fallbacks are center-cropped to 1920×1080 without stretching and
+stored separately under `PegasusMedia/game-wallpapers-screenshot-fallback`.
+Pegasus metadata records `x-background-source`, `x-background-source-url`, and
+`x-background-transform`. The full collection is also indexed after every scan
+in `PegasusMedia/background-provenance.json`; legacy assets whose origin cannot
+be proven are labeled `unclassified-existing-background`, not wallpaper.
