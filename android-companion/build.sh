@@ -8,12 +8,20 @@ ANDROID_PLATFORM=${ANDROID_PLATFORM:-android-36}
 BUILD_TOOLS="$SDK_DIR/build-tools/$BUILD_TOOLS_VERSION"
 ANDROID_JAR="$SDK_DIR/platforms/$ANDROID_PLATFORM/android.jar"
 BUILD_DIR="$PROJECT_DIR/build"
+THEME_DIR=$(CDPATH= cd -- "$PROJECT_DIR/../theme" && pwd)
+THEME_ARCHIVE="$PROJECT_DIR/assets/pegasus-lucent-theme.zip"
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}
 export JAVA_HOME
 PATH="$JAVA_HOME/bin:$PATH"
 export PATH
 
 mkdir -p "$BUILD_DIR/classes" "$BUILD_DIR/dex"
+# The companion and theme ship as one versioned unit. Always rebuild the
+# embedded archive from source before aapt packages assets; a stale ZIP can
+# otherwise report the new version while silently reinstalling old QML.
+rm -f "$THEME_ARCHIVE.partial.zip"
+(cd "$THEME_DIR" && /usr/bin/zip -q -r "$THEME_ARCHIVE.partial.zip" .)
+mv "$THEME_ARCHIVE.partial.zip" "$THEME_ARCHIVE"
 "$BUILD_TOOLS/aapt2" compile --dir "$PROJECT_DIR/res" -o "$BUILD_DIR/resources.zip"
 "$BUILD_TOOLS/aapt2" link \
     -I "$ANDROID_JAR" \

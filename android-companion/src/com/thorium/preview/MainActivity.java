@@ -2,6 +2,7 @@ package com.thorium.preview;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -41,8 +42,14 @@ public final class MainActivity extends Activity {
     private TextView themeStatus;
     private TextView permissionStatus;
     private TextView activityStatus;
+    private TextView openPegasusButton;
+    private TextView repairThemeButton;
+    private TextView updateCheckButton;
+    private TextView updateInstallButton;
+    private TextView grantAccessButton;
     private boolean polling;
     private boolean initialScanRequested;
+    private volatile int updateMonitorGeneration;
 
     private final Runnable poller = new Runnable() {
         @Override public void run() {
@@ -72,6 +79,7 @@ public final class MainActivity extends Activity {
             handler.postDelayed(() -> callService("/import/initial",
                     "Automatic library discovery started"), 500L);
         }
+        handler.postDelayed(() -> monitorUpdateStatus(false), 700L);
     }
 
     @Override protected void onPause() {
@@ -103,7 +111,8 @@ public final class MainActivity extends Activity {
         stage.addView(content, new LinearLayout.LayoutParams(contentWidth,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        TextView mark = label("LUCENT  /  ANDROID COMPANION", 12, Color.rgb(113, 230, 176));
+        TextView mark = label("LUCENT  /  ANDROID COMPANION  /  APP " + appVersionName(),
+                12, Color.rgb(113, 230, 176));
         mark.setLetterSpacing(0.18f);
         content.addView(mark, matchWrap(0));
 
@@ -135,15 +144,20 @@ public final class MainActivity extends Activity {
         permissionStatus = label("Checking library access…", 15, Color.rgb(182, 192, 205));
         card.addView(permissionStatus, matchWrap(dp(6)));
 
-        content.addView(action("OPEN PEGASUS", true, view -> openPegasus()), buttonParams(0));
-        content.addView(action("INSTALL / REPAIR LUCENT THEME", false,
-                view -> repairTheme()), buttonParams(dp(10)));
-        content.addView(action("CHECK FOR UPDATES", false,
-                view -> callService("/update/check", "Checking GitHub for updates")), buttonParams(dp(10)));
-        content.addView(action("INSTALL DOWNLOADED UPDATE", false,
-                view -> callService("/update/install", "Opening Android installer")), buttonParams(dp(10)));
-        content.addView(action("GRANT LIBRARY ACCESS", false,
-                view -> requestStorageIfNeeded(true)), buttonParams(dp(10)));
+        openPegasusButton = action("OPEN PEGASUS", true, view -> openPegasus());
+        content.addView(openPegasusButton, buttonParams(0));
+        repairThemeButton = action("INSTALL / REPAIR LUCENT THEME", false,
+                view -> repairTheme());
+        content.addView(repairThemeButton, buttonParams(dp(10)));
+        updateCheckButton = action("CHECK FOR UPDATES", false,
+                view -> checkForUpdates());
+        content.addView(updateCheckButton, buttonParams(dp(10)));
+        updateInstallButton = action("INSTALL DOWNLOADED UPDATE", false,
+                view -> callService("/update/install", "Opening Android installer"));
+        content.addView(updateInstallButton, buttonParams(dp(10)));
+        grantAccessButton = action("GRANT LIBRARY ACCESS", false,
+                view -> requestStorageIfNeeded(true));
+        content.addView(grantAccessButton, buttonParams(dp(10)));
 
         activityStatus = label("Lucent scans the complete device automatically after library access is granted.",
                 14, Color.rgb(146, 158, 174));
@@ -185,8 +199,14 @@ public final class MainActivity extends Activity {
             } catch (RuntimeException ignored) {}
             return;
         }
-        launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-        startActivity(launch);
+        // Metadata is parsed when Pegasus starts. Reordering an existing task
+        // leaves its stale in-memory library intact, which made a successful
+        // scan look empty. Pegasus is backgrounded while this dashboard is
+        // visible, so restart only that process and launch a fresh task.
+        ActivityManager manager = (ActivityManager)getSystemService(ACTIVITY_SERVICE);
+        if (manager != null) manager.killBackgroundProcesses(PEGASUS_PACKAGE);
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        handler.postDelayed(() -> startActivity(launch), 250L);
     }
 
     private void requestStorageIfNeeded(boolean userInitiated) {
@@ -229,13 +249,31 @@ public final class MainActivity extends Activity {
         String version = ThemeInstaller.installedVersion();
         boolean installed = theme.isFile();
         themeStatus.setText(installed
-                ? "✓  Theme installed" + (version.isEmpty() ? "" : "  •  version " + version)
+                ? "✓  Lucent theme installed" +
+                        (version.isEmpty() ? "" : "  •  theme " + version) +
+                        "  •  companion " + appVersionName()
                 : "○  Theme installation pending");
         themeStatus.setTextColor(installed ? Color.rgb(113, 230, 176) : Color.rgb(240, 184, 92));
+        setActionState(repairThemeButton, installed ? 1 : 0,
+                installed ? "✓  LUCENT THEME INSTALLED" : "INSTALL / REPAIR LUCENT THEME");
         boolean permitted = hasLibraryAccess();
         permissionStatus.setText(permitted
                 ? "✓  Library access granted" : "○  Library access needs approval");
         permissionStatus.setTextColor(permitted ? Color.rgb(113, 230, 176) : Color.rgb(240, 184, 92));
+        setActionState(grantAccessButton, permitted ? 1 : 0,
+                permitted ? "✓  LIBRARY ACCESS GRANTED" : "GRANT LIBRARY ACCESS");
+        android.content.SharedPreferences updateUi = getSharedPreferences("updates-ui", 0);
+        String persistedUpdateState = updateUi.getString("state", "");
+        long updateAge = System.currentTimeMillis() - updateUi.getLong("updatedAt", 0L);
+        boolean staleProgress = ("checking".equals(persistedUpdateState) ||
+                "theme".equals(persistedUpdateState) ||
+                "software".equals(persistedUpdateState)) && updateAge > 70_000L;
+        if (staleProgress) {
+            updateUpdateButtons("interrupted", false);
+        } else if (!persistedUpdateState.isEmpty()) {
+            updateUpdateButtons(persistedUpdateState,
+                    updateUi.getBoolean("installReady", false));
+        }
         readServiceStatus("/update/status");
     }
 
@@ -249,16 +287,65 @@ public final class MainActivity extends Activity {
         thread.start();
     }
 
+    private void checkForUpdates() {
+        setActionState(updateCheckButton, 2, "CHECKING FOR UPDATES…");
+        activityStatus.setText("Checking GitHub for updates…");
+        Thread request = new Thread(() -> {
+            http("/update/check");
+            monitorUpdateStatus(true);
+        }, "lucent-dashboard-update-request");
+        request.setDaemon(true);
+        request.start();
+    }
+
+    private void monitorUpdateStatus(boolean userInitiated) {
+        final int generation = ++updateMonitorGeneration;
+        Thread monitor = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + 55_000L;
+            while (System.currentTimeMillis() < deadline && generation == updateMonitorGeneration) {
+                String response = http("/update/status");
+                try {
+                    JSONObject value = new JSONObject(response);
+                    String state = value.optString("state");
+                    boolean installReady = value.optBoolean("installReady", false);
+                    String statusMessage = value.optString("message", "Lucent is ready");
+                    runOnUiThread(() -> {
+                        updateUpdateButtons(state, installReady);
+                        if (!"idle".equals(state)) activityStatus.setText(statusMessage);
+                    });
+                    if ("complete".equals(state) || "available".equals(state) ||
+                            "permission".equals(state) || "error".equals(state)) return;
+                } catch (Exception ignored) {}
+                try { Thread.sleep(600L); }
+                catch (InterruptedException interrupted) { return; }
+            }
+            if (generation == updateMonitorGeneration && userInitiated) {
+                runOnUiThread(() -> {
+                    setActionState(updateCheckButton, -1,
+                            "UPDATE CHECK TIMED OUT — TAP TO RETRY");
+                    activityStatus.setText("Update check timed out; network and library remain safe.");
+                });
+            }
+        }, "lucent-dashboard-update-monitor");
+        monitor.setDaemon(true);
+        monitor.start();
+    }
+
     private void readServiceStatus(String path) {
         Thread thread = new Thread(() -> {
             String response = http(path);
             if (response.isEmpty()) return;
             String message = message(response, "Lucent is ready");
+            JSONObject value;
             try {
-                JSONObject value = new JSONObject(response);
-                if ("idle".equals(value.optString("state"))) return;
+                value = new JSONObject(response);
             } catch (Exception ignored) { return; }
-            runOnUiThread(() -> activityStatus.setText(message));
+            String state = value.optString("state");
+            boolean installReady = value.optBoolean("installReady", false);
+            runOnUiThread(() -> {
+                updateUpdateButtons(state, installReady);
+                if (!"idle".equals(state)) activityStatus.setText(message);
+            });
         }, "lucent-dashboard-status");
         thread.setDaemon(true);
         thread.start();
@@ -293,6 +380,14 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) { return fallback; }
     }
 
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+            return "unknown";
+        }
+    }
+
     private TextView action(String text, boolean primary, View.OnClickListener listener) {
         TextView button = label(text, 14, primary ? Color.rgb(4, 17, 12) : Color.WHITE);
         button.setTypeface(Typeface.DEFAULT_BOLD);
@@ -303,6 +398,51 @@ public final class MainActivity extends Activity {
         button.setBackground(buttonBackground(primary));
         button.setOnClickListener(listener);
         return button;
+    }
+
+    private void updateUpdateButtons(String state, boolean installReady) {
+        if ("idle".equals(state)) {
+            setActionState(updateCheckButton, 0, "CHECK FOR UPDATES");
+            setActionState(updateInstallButton, installReady ? 2 : 0,
+                    installReady ? "UPDATE READY — INSTALL" : "INSTALL DOWNLOADED UPDATE");
+        } else if ("checking".equals(state) || "theme".equals(state) || "software".equals(state)) {
+            setActionState(updateCheckButton, 2, "CHECKING FOR UPDATES…");
+            setActionState(updateInstallButton, installReady ? 2 : 0,
+                    installReady ? "UPDATE READY TO INSTALL" : "INSTALL DOWNLOADED UPDATE");
+        } else if ("complete".equals(state)) {
+            setActionState(updateCheckButton, 1, "✓  UPDATES CHECKED — CURRENT");
+            setActionState(updateInstallButton, 1, "✓  NO UPDATE INSTALL NEEDED");
+        } else if ("available".equals(state) || "permission".equals(state)) {
+            setActionState(updateCheckButton, 1, "✓  UPDATE CHECK COMPLETED");
+            setActionState(updateInstallButton, 2, "UPDATE READY — INSTALL");
+        } else if ("error".equals(state) || "interrupted".equals(state)) {
+            setActionState(updateCheckButton, -1, "UPDATE CHECK FAILED — TAP TO RETRY");
+            setActionState(updateInstallButton, 0, "INSTALL DOWNLOADED UPDATE");
+        }
+    }
+
+    /** state: -1 error, 0 pending, 1 complete, 2 working/action required. */
+    private void setActionState(TextView button, int state, String text) {
+        if (button == null) return;
+        button.setText(text);
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(14));
+        if (state == 1) {
+            background.setColor(Color.rgb(113, 230, 176));
+            button.setTextColor(Color.rgb(4, 17, 12));
+        } else if (state == 2) {
+            background.setColor(Color.rgb(240, 184, 92));
+            button.setTextColor(Color.rgb(20, 13, 3));
+        } else if (state < 0) {
+            background.setColor(Color.rgb(102, 35, 40));
+            background.setStroke(dp(1), Color.rgb(238, 112, 121));
+            button.setTextColor(Color.WHITE);
+        } else {
+            background.setColor(Color.rgb(22, 30, 41));
+            background.setStroke(dp(1), Color.rgb(55, 69, 86));
+            button.setTextColor(Color.WHITE);
+        }
+        button.setBackground(background);
     }
 
     private TextView label(String text, float size, int color) {

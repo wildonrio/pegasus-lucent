@@ -58,9 +58,13 @@ final class ImportManager {
     private static final File GAMES = new File(Environment.getExternalStorageDirectory(), "Games");
     private static final File PEGASUS = new File(Environment.getExternalStorageDirectory(),
             "pegasus-frontend");
+    private static final File PEGASUS_CONFIG = new File(Environment.getExternalStorageDirectory(),
+            "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
     private static final File REGISTRY = new File(PEGASUS, "thorium-imports.json");
-    private static final File AUTO_METADATA = new File(PEGASUS,
-            "99-thorium-auto-import.metadata.pegasus.txt");
+    private static final File AUTO_METADATA = new File(new File(PEGASUS_CONFIG, "metafiles"),
+            "99-lucent-auto-import.metadata.pegasus.txt");
+    private static final File LEGACY_AUTO_METADATA = new File(PEGASUS,
+            "99-lucent-auto-import.metadata.pegasus.txt");
     private static final long RESCAN_THROTTLE_MS = 45_000L;
     private static final long MISS_RETRY_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final Pattern HREF = Pattern.compile("href=\"([^\"]+\\.(?:png|jpg|jpeg))\"",
@@ -99,9 +103,12 @@ final class ImportManager {
                     Collections.emptyList(), 0, false);
             return;
         }
-        boolean alreadyDiscovered = context.getSharedPreferences("lucent-library", 0)
-                .getBoolean("fullDiscoveryV2", false);
-        startScan(!alreadyDiscovered);
+        // Downloads are only one ingress path. Games can also arrive through
+        // USB, another handheld, an SD-card move, or a file manager. Run the
+        // conservative full discovery on every fresh app/service launch; it
+        // skips every ROM already referenced by existing Pegasus metadata, so
+        // this remains incremental even for multi-thousand-game libraries.
+        startScan(true);
     }
 
     private void startScan(boolean fullDiscovery) {
@@ -117,9 +124,6 @@ final class ImportManager {
         Thread worker = new Thread(() -> {
             try {
                 runScan(fullDiscovery);
-                if (fullDiscovery)
-                    context.getSharedPreferences("lucent-library", 0).edit()
-                            .putBoolean("fullDiscoveryV2", true).apply();
             } catch (Throwable error) {
                 Log.e(TAG, "Import failed", error);
                 setStatus("error", 1.0, "Import stopped safely: " + shortError(error),
@@ -187,6 +191,8 @@ final class ImportManager {
 
     private void runScan(boolean fullDiscovery) throws Exception {
         PEGASUS.mkdirs();
+        File metadataParent = AUTO_METADATA.getParentFile();
+        if (metadataParent != null) metadataParent.mkdirs();
         GAMES.mkdirs();
         File mediaRoot = mediaRoot();
         File cacheRoot = new File(PEGASUS, ".thorium-import-cache");
@@ -227,6 +233,15 @@ final class ImportManager {
             setStatus("transferring", base, "Adding " + candidate.title + "…",
                     titles, imported.size(), false);
             if (registeredSources.contains(candidate.identity)) {
+                JSONObject saved = registeredGame(registry, candidate.identity);
+                // A previous scan may have been interrupted after the durable
+                // registry write but before media enrichment and metadata
+                // generation. Resume that exact ROM instead of permanently
+                // treating the half-finished row as complete.
+                if (saved != null && saved.optInt("enrichmentVersion", 0) < 2) {
+                    ImportedGame pending = ImportedGame.fromJson(saved);
+                    if (pending != null) imported.add(pending);
+                }
                 if (candidate.zipEntry != null)
                     archiveSuccesses.put(candidate.source,
                             archiveSuccesses.getOrDefault(candidate.source, 0) + 1);
@@ -237,6 +252,10 @@ final class ImportManager {
                 imported.add(game);
                 registry.put(game.toJson());
                 writeJsonAtomic(REGISTRY, registry);
+                // Pegasus must never have an empty library merely because a
+                // long artwork/video pass is interrupted. Publish the ROM
+                // record immediately, then enrich it in place below.
+                writeMetadata(registry);
                 if (candidate.zipEntry != null)
                     archiveSuccesses.put(candidate.source,
                             archiveSuccesses.getOrDefault(candidate.source, 0) + 1);
@@ -247,10 +266,42 @@ final class ImportManager {
                 archive.getKey().delete();
         }
 
+        // Pending rows must resume even when the one-time full filesystem
+        // discovery flag is already set. Otherwise an interrupted first scan
+        // has no candidates on later launches and can never finish media.
+        Set<String> queuedIdentities = new HashSet<>();
+        for (ImportedGame game : imported) queuedIdentities.add(game.sourceIdentity);
+        List<ImportedGame> mediaRepairs = new ArrayList<>();
+        for (int rowIndex = 0; rowIndex < registry.length(); rowIndex++) {
+            JSONObject row = registry.optJSONObject(rowIndex);
+            if (row == null || queuedIdentities.contains(row.optString("sourceIdentity"))) continue;
+            ImportedGame pending = ImportedGame.fromJson(row);
+            if (pending != null && row.optInt("enrichmentVersion", 0) < 2) {
+                imported.add(pending);
+                queuedIdentities.add(pending.sourceIdentity);
+            } else if (pending != null && needsMediaRepair(pending)) {
+                // A completed score lookup does not mean media exists. Older
+                // builds marked rows enriched even when a provider had not yet
+                // yielded a cover, wallpaper, or video, permanently preventing
+                // retries. Audit those gaps on every fresh service launch.
+                mediaRepairs.add(pending);
+                queuedIdentities.add(pending.sourceIdentity);
+                if (!titles.contains(pending.title)) titles.add(pending.title);
+            }
+        }
+
+        // Rebuild from the durable registry on every scan. This is the
+        // recovery path for versions that could save registry rows without
+        // ever regenerating 99-thorium-auto-import.metadata.pegasus.txt.
+        writeMetadata(registry);
+
         if (!imported.isEmpty()) {
             setStatus("artwork", 0.55, "Downloading exact box art…", titles,
                     imported.size(), false);
-            for (ImportedGame game : imported) enrichBoxArt(game, cacheRoot, mediaRoot);
+            for (ImportedGame game : imported) {
+                enrichBoxArt(game, cacheRoot, mediaRoot);
+                enrichBackground(game, cacheRoot, mediaRoot);
+            }
 
             setStatus("video", 0.68, "Finding video previews…", titles,
                     imported.size(), false);
@@ -264,7 +315,17 @@ final class ImportManager {
                 enrichGameRankings(game);
                 enrichMobyGames(game);
                 calculateCriticComposite(game);
-                game.archived = game.boxArt.isEmpty();
+                // A verified ROM is always a game. Media can continue filling
+                // in later; it must never make a discovered title disappear.
+                game.archived = false;
+                game.enriched = true;
+
+                // Commit every completed game independently. If Android
+                // stops the service, the next run resumes only unfinished
+                // entries and Pegasus retains everything completed so far.
+                registry = mergeRegistry(readRegistry(), Collections.singletonList(game));
+                writeJsonAtomic(REGISTRY, registry);
+                writeMetadata(registry);
             }
 
             // Replace provisional registry rows with enriched records.
@@ -275,26 +336,64 @@ final class ImportManager {
             writeMetadata(registry);
         }
 
-        setStatus("artwork", 0.93, "Checking the full library for missing artwork…",
+        int registryMediaRepaired = 0;
+        if (!mediaRepairs.isEmpty()) {
+            setStatus("artwork", 0.88,
+                    "Repairing missing covers and wallpapers for " +
+                            mediaRepairs.size() + " games…",
+                    titles, imported.size(), !imported.isEmpty());
+            for (ImportedGame game : mediaRepairs) {
+                boolean missingBoxBefore = missingMediaFile(game.boxArt);
+                boolean missingBackgroundBefore = missingMediaFile(game.background);
+                if (missingBoxBefore) enrichBoxArt(game, cacheRoot, mediaRoot);
+                if (missingBackgroundBefore) enrichBackground(game, cacheRoot, mediaRoot);
+                if (missingBoxBefore && !missingMediaFile(game.boxArt)) registryMediaRepaired++;
+                if (missingBackgroundBefore && !missingMediaFile(game.background))
+                    registryMediaRepaired++;
+            }
+            setStatus("video", 0.91,
+                    "Finding missing preview videos for " + mediaRepairs.size() + " games…",
+                    titles, imported.size(), !imported.isEmpty());
+            for (ImportedGame game : mediaRepairs) {
+                boolean missingVideoBefore = missingMediaFile(game.video);
+                if (missingVideoBefore) enrichVideo(game, cacheRoot, mediaRoot);
+                if (missingVideoBefore && !missingMediaFile(game.video)) registryMediaRepaired++;
+                registry = mergeRegistry(readRegistry(), Collections.singletonList(game));
+                writeJsonAtomic(REGISTRY, registry);
+                writeMetadata(registry);
+            }
+        }
+
+        setStatus("artwork", 0.93,
+                "Auditing the full library for missing covers, wallpapers, and videos…",
                 titles, imported.size(), !imported.isEmpty());
-        int repaired = repairMissingArtwork(cacheRoot, mediaRoot);
+        int repaired = registryMediaRepaired + repairMissingMedia(cacheRoot, mediaRoot);
 
         setStatus("scores", 0.97, "Filling historical GameRankings critic scores…",
                 titles, imported.size(), !imported.isEmpty() || repaired > 0);
         int scoreRepairs = repairMissingScores();
 
+        int mediaGapGames = 0;
+        for (ImportedGame game : mediaRepairs)
+            if (needsMediaRepair(game)) mediaGapGames++;
+
         String message;
         boolean reload = !imported.isEmpty() || repaired > 0 || scoreRepairs > 0;
         if (!imported.isEmpty()) {
             message = imported.size() + (imported.size() == 1 ? " game added" : " games added");
-            if (repaired > 0) message += " • " + repaired + " covers repaired";
+            if (repaired > 0) message += " • " + repaired + " media files repaired";
             if (scoreRepairs > 0) message += " • " + scoreRepairs + " historical scores added";
             message += " • reload Pegasus when convenient";
         } else if (repaired > 0 || scoreRepairs > 0) {
             List<String> updates = new ArrayList<>();
-            if (repaired > 0) updates.add(repaired + (repaired == 1 ? " cover repaired" : " covers repaired"));
+            if (repaired > 0) updates.add(repaired +
+                    (repaired == 1 ? " media file repaired" : " media files repaired"));
             if (scoreRepairs > 0) updates.add(scoreRepairs + " historical scores added");
             message = join(updates, " • ") + " • reload Pegasus when convenient";
+        } else if (mediaGapGames > 0) {
+            message = "Media audit complete • " + mediaGapGames +
+                    (mediaGapGames == 1 ? " game still needs a source" :
+                            " games still need sources") + " • retrying next launch";
         } else {
             message = "Library scan complete • no new games";
         }
@@ -329,16 +428,21 @@ final class ImportManager {
     private List<Candidate> discoverExistingCandidates() {
         List<Candidate> found = new ArrayList<>();
         Set<String> referenced = existingMetadataPaths();
+        Set<String> knownGames = existingMetadataGameIdentities();
+        Log.i(TAG, "Full discovery baseline: " + metadataFiles().size() +
+                " metadata files, " + referenced.size() + " ROM paths, " +
+                knownGames.size() + " system/title identities");
         Set<String> visited = new HashSet<>();
         List<File> roots = libraryRoots();
         int[] inspected = new int[]{0};
         for (File root : roots)
-            scanLibraryRoot(root, 0, found, referenced, visited, inspected);
+            scanLibraryRoot(root, 0, found, referenced, knownGames, visited, inspected);
         return found;
     }
 
     private void scanLibraryRoot(File directory, int depth, List<Candidate> found,
-                                 Set<String> referenced, Set<String> visited, int[] inspected) {
+                                 Set<String> referenced, Set<String> knownGames,
+                                 Set<String> visited, int[] inspected) {
         if (directory == null || depth > 12 || inspected[0] > 250000) return;
         String canonical = canonical(directory.getAbsolutePath());
         if (!visited.add(canonical) || shouldSkipLibraryDirectory(directory)) return;
@@ -348,7 +452,7 @@ final class ImportManager {
         for (File entry : entries) {
             if (inspected[0]++ > 250000) return;
             if (entry.isDirectory()) {
-                scanLibraryRoot(entry, depth + 1, found, referenced, visited, inspected);
+                scanLibraryRoot(entry, depth + 1, found, referenced, knownGames, visited, inspected);
                 continue;
             }
             if (!entry.isFile() || entry.getName().startsWith(".") || isPartial(entry.getName()))
@@ -361,6 +465,18 @@ final class ImportManager {
             if (system == null) system = GameSystems.unambiguousByExtension(ext);
             if (system == null) continue;
             String title = cleanTitle(stem(entry.getName()));
+            // Storage migrations and backups frequently change an absolute
+            // path without changing the actual game. Pegasus already owns the
+            // canonical system/title identity, so do not generate a second
+            // entry merely because another copy exists somewhere else.
+            Set<String> candidateIdentities = new HashSet<>();
+            addGameIdentities(candidateIdentities, system.folder, title);
+            addGameIdentities(candidateIdentities, system.folder, stem(entry.getName()));
+            File parent = entry.getParentFile();
+            if (parent != null && !GameSystems.isKnownSystemDirectory(parent))
+                addGameIdentities(candidateIdentities, system.folder, parent.getName());
+            if (!Collections.disjoint(knownGames, candidateIdentities)) continue;
+            knownGames.addAll(candidateIdentities);
             found.add(new Candidate(entry, null, system, title,
                     path + ":" + entry.length(), true));
         }
@@ -402,7 +518,9 @@ final class ImportManager {
 
     private static boolean shouldSkipLibraryDirectory(File directory) {
         String name = directory.getName().toLowerCase(Locale.US);
-        return name.startsWith(".") || "android".equals(name) || "download".equals(name) ||
+        return name.startsWith(".") || name.contains("backup") || name.contains("quarantine") ||
+                "saves".equals(name) || "save".equals(name) ||
+                "android".equals(name) || "download".equals(name) ||
                 "downloads".equals(name) || "pegasusmedia".equals(name) ||
                 "pegasus-frontend".equals(name) || "dcim".equals(name) ||
                 "pictures".equals(name) || "movies".equals(name) || "music".equals(name) ||
@@ -417,10 +535,7 @@ final class ImportManager {
 
     private static Set<String> existingMetadataPaths() {
         Set<String> paths = new HashSet<>();
-        File[] metadata = PEGASUS.listFiles((dir, name) ->
-                name.endsWith(".metadata.pegasus.txt") || name.equals("metadata.pegasus.txt"));
-        if (metadata == null) return paths;
-        for (File file : metadata) {
+        for (File file : metadataFiles()) {
             try {
                 for (String stanza : splitStanzas(readText(file))) {
                     String path = field(stanza, "file");
@@ -429,6 +544,51 @@ final class ImportManager {
             } catch (Exception ignored) {}
         }
         return paths;
+    }
+
+    private static Set<String> existingMetadataGameIdentities() {
+        Set<String> identities = new HashSet<>();
+        for (File file : metadataFiles()) {
+            try {
+                for (String stanza : splitStanzas(readText(file))) {
+                    String title = field(stanza, "game");
+                    String path = field(stanza, "file");
+                    if (title.isEmpty() || path.isEmpty()) continue;
+                    GameSystems.SystemDef system = systemFromRomPath(path);
+                    if (system != null) {
+                        addGameIdentities(identities, system.folder, title);
+                        File rom = new File(path);
+                        addGameIdentities(identities, system.folder, stem(rom.getName()));
+                        File parent = rom.getParentFile();
+                        if (parent != null && !GameSystems.isKnownSystemDirectory(parent))
+                            addGameIdentities(identities, system.folder, parent.getName());
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        return identities;
+    }
+
+    private static void addGameIdentities(Set<String> identities, String folder, String value) {
+        String normalized = normalize(value);
+        if (normalized.isEmpty()) return;
+        identities.add(folder + "|" + normalized);
+        String alias = scoreAlias(normalized);
+        if (!alias.isEmpty()) identities.add(folder + "|" + alias);
+    }
+
+    private static List<File> metadataFiles() {
+        LinkedHashMap<String, File> files = new LinkedHashMap<>();
+        List<File> roots = Arrays.asList(PEGASUS, new File(PEGASUS_CONFIG, "metafiles"));
+        for (File root : roots) {
+            File[] metadata = root.listFiles((dir, name) ->
+                    name.endsWith(".metadata.pegasus.txt") ||
+                            name.equals("metadata.pegasus.txt"));
+            if (metadata == null) continue;
+            for (File file : metadata)
+                files.put(canonical(file.getAbsolutePath()), file);
+        }
+        return new ArrayList<>(files.values());
     }
 
     private List<Candidate> inspectZip(File archive, File cacheRoot) {
@@ -519,6 +679,22 @@ final class ImportManager {
             if (download(match.url, target, 64L * 1024L * 1024L)) game.boxArt = target.getAbsolutePath();
         } catch (Exception error) {
             Log.w(TAG, "Box art unavailable for " + game.title, error);
+        }
+    }
+
+    private void enrichBackground(ImportedGame game, File cacheRoot, File mediaRoot) {
+        try {
+            CatalogMatch match = catalogMatch(game.system, game.title, cacheRoot, "Named_Snaps");
+            if (match == null) return;
+            File folder = new File(mediaRoot, "background/" + game.system.folder);
+            folder.mkdirs();
+            String ext = extension(match.url);
+            File target = new File(folder, sha1(game.rom.getAbsolutePath()) + "." +
+                    (ext.isEmpty() ? "png" : ext));
+            if (download(match.url, target, 64L * 1024L * 1024L))
+                game.background = target.getAbsolutePath();
+        } catch (Exception error) {
+            Log.w(TAG, "Wallpaper unavailable for " + game.title, error);
         }
     }
 
@@ -922,9 +1098,19 @@ final class ImportManager {
         return compact.toString();
     }
 
-    private int repairMissingArtwork(File cacheRoot, File mediaRoot) {
+    private static boolean missingMediaFile(String path) {
+        return path == null || path.isEmpty() || !new File(path).isFile();
+    }
+
+    private static boolean needsMediaRepair(ImportedGame game) {
+        return missingMediaFile(game.boxArt) || missingMediaFile(game.background) ||
+                missingMediaFile(game.video);
+    }
+
+    private int repairMissingMedia(File cacheRoot, File mediaRoot) {
         File[] files = PEGASUS.listFiles((dir, name) -> name.endsWith(".metadata.pegasus.txt") &&
-                !name.equals(AUTO_METADATA.getName()));
+                !name.startsWith("99-lucent-auto-") &&
+                !name.startsWith("99-thorium-auto-"));
         if (files == null) return 0;
         int repaired = 0;
         for (File metadata : files) {
@@ -937,28 +1123,52 @@ final class ImportManager {
                     String title = field(stanza, "game");
                     String romPath = field(stanza, "file");
                     String artPath = field(stanza, "assets.boxFront");
-                    if (!artPath.isEmpty() && new File(artPath).isFile()) continue;
+                    String backgroundPath = field(stanza, "assets.background");
+                    String videoPath = field(stanza, "assets.video");
+                    boolean needsArt = missingMediaFile(artPath);
+                    boolean needsBackground = missingMediaFile(backgroundPath);
+                    boolean needsVideo = missingMediaFile(videoPath);
+                    if (!needsArt && !needsBackground && !needsVideo) continue;
                     GameSystems.SystemDef system = systemFromRomPath(romPath);
-                    if (system == null || recentlyMissed(cacheRoot, system, title)) continue;
-                    CatalogMatch match = boxArtMatch(system, title, cacheRoot);
-                    if (match == null) {
-                        recordMiss(cacheRoot, system, title);
-                        continue;
+                    File rom = new File(romPath);
+                    if (system == null || !rom.isFile()) continue;
+                    ImportedGame game = new ImportedGame(system,
+                            "metadata:" + romPath, cleanTitle(title), rom);
+                    game.boxArt = artPath;
+                    game.background = backgroundPath;
+                    game.video = videoPath;
+
+                    if (needsArt && !recentlyMissed(cacheRoot, system, title)) {
+                        enrichBoxArt(game, cacheRoot, mediaRoot);
+                        if (missingMediaFile(game.boxArt)) recordMiss(cacheRoot, system, title);
                     }
-                    File folder = new File(mediaRoot, "boxfront/" + system.folder);
-                    folder.mkdirs();
-                    String ext = extension(match.url);
-                    File target = new File(folder, sha1(romPath) + "." +
-                            (ext.isEmpty() ? "png" : ext));
-                    if (!download(match.url, target, 64L * 1024L * 1024L)) continue;
-                    String cleaned = removeField(stanza, "assets.boxFront");
-                    stanzas.set(i, cleaned.trim() + "\nassets.boxFront: " + target.getAbsolutePath());
-                    changed = true;
-                    repaired++;
+                    if (needsBackground) enrichBackground(game, cacheRoot, mediaRoot);
+                    if (needsVideo) enrichVideo(game, cacheRoot, mediaRoot);
+
+                    String updated = stanza;
+                    if (needsArt && !missingMediaFile(game.boxArt)) {
+                        updated = removeField(updated, "assets.boxFront").trim() +
+                                "\nassets.boxFront: " + game.boxArt;
+                        repaired++;
+                    }
+                    if (needsBackground && !missingMediaFile(game.background)) {
+                        updated = removeField(updated, "assets.background").trim() +
+                                "\nassets.background: " + game.background;
+                        repaired++;
+                    }
+                    if (needsVideo && !missingMediaFile(game.video)) {
+                        updated = removeField(updated, "assets.video").trim() +
+                                "\nassets.video: " + game.video;
+                        repaired++;
+                    }
+                    if (!updated.equals(stanza)) {
+                        stanzas.set(i, updated);
+                        changed = true;
+                    }
                 }
                 if (changed) writeTextAtomic(metadata, joinStanzas(stanzas));
             } catch (Exception error) {
-                Log.w(TAG, "Artwork audit skipped " + metadata, error);
+                Log.w(TAG, "Media audit skipped " + metadata, error);
             }
         }
         return repaired;
@@ -966,23 +1176,30 @@ final class ImportManager {
 
     private CatalogMatch boxArtMatch(GameSystems.SystemDef system, String title, File cacheRoot)
             throws Exception {
+        return catalogMatch(system, title, cacheRoot, "Named_Boxarts");
+    }
+
+    private CatalogMatch catalogMatch(GameSystems.SystemDef system, String title, File cacheRoot,
+                                      String category) throws Exception {
         if (system.libretro.isEmpty()) return null;
-        File cache = new File(cacheRoot, "libretro-" + system.folder + ".html");
+        File cache = new File(cacheRoot, "libretro-" + system.folder + "-" + category + ".html");
         String html = cachedText(cache,
-                "https://thumbnails.libretro.com/" + encodePath(system.libretro) + "/Named_Boxarts/",
+                "https://thumbnails.libretro.com/" + encodePath(system.libretro) + "/" + category + "/",
                 7L * 24L * 60L * 60L * 1000L, 32L * 1024L * 1024L);
         String key = normalize(title);
+        String alias = scoreAlias(key);
         List<String> exact = new ArrayList<>();
         Matcher matcher = HREF.matcher(html);
         while (matcher.find()) {
             String href = matcher.group(1);
-            if (normalize(stem(decode(href))).equals(key)) exact.add(href);
+            String candidate = normalize(stem(decode(href)));
+            if (candidate.equals(key) || scoreAlias(candidate).equals(alias)) exact.add(href);
         }
         if (exact.isEmpty()) return null;
         exact.sort((left, right) -> Integer.compare(regionRank(left), regionRank(right)));
         String href = exact.get(0);
         String base = "https://thumbnails.libretro.com/" + encodePath(system.libretro) +
-                "/Named_Boxarts/";
+                "/" + category + "/";
         return new CatalogMatch(base + encodeHref(href), cleanTitle(stem(decode(href))));
     }
 
@@ -1004,13 +1221,15 @@ final class ImportManager {
         JSONArray files = root.optJSONArray("files");
         if (files == null) return null;
         String key = normalize(title);
+        String alias = scoreAlias(key);
         String selected = null;
         for (int i = 0; i < files.length(); i++) {
             JSONObject item = files.optJSONObject(i);
             String name = item == null ? "" : item.optString("name", "");
             if (!name.toLowerCase(Locale.US).endsWith(".mp4") ||
                     name.toLowerCase(Locale.US).endsWith(".ia.mp4")) continue;
-            if (normalize(stem(name)).equals(key)) {
+            String candidate = normalize(stem(name));
+            if (candidate.equals(key) || scoreAlias(candidate).equals(alias)) {
                 if (selected == null || regionRank(name) < regionRank(selected)) selected = name;
             }
         }
@@ -1023,27 +1242,37 @@ final class ImportManager {
     }
 
     private void writeMetadata(JSONArray registry) throws Exception {
-        Map<String, List<JSONObject>> groups = new LinkedHashMap<>();
+        Map<String, LinkedHashMap<String, JSONObject>> groups = new LinkedHashMap<>();
         for (int i = 0; i < registry.length(); i++) {
             JSONObject row = registry.optJSONObject(i);
             if (row == null || !new File(row.optString("file")).isFile()) continue;
             if (row.optBoolean("archived", false) &&
                     !row.optBoolean("forceInclude", false)) continue;
             String folder = row.optString("system");
-            groups.computeIfAbsent(folder, key -> new ArrayList<>()).add(row);
+            String identity = normalize(row.optString("title"));
+            LinkedHashMap<String, JSONObject> games = groups.computeIfAbsent(
+                    folder, key -> new LinkedHashMap<>());
+            JSONObject previous = games.get(identity);
+            if (previous == null || metadataQuality(row) > metadataQuality(previous))
+                games.put(identity, row);
         }
-        StringBuilder out = new StringBuilder("# Generated atomically by THOR Library Importer.\n");
-        for (Map.Entry<String, List<JSONObject>> group : groups.entrySet()) {
+        Set<String> activeGeneratedFiles = new HashSet<>();
+        for (Map.Entry<String, LinkedHashMap<String, JSONObject>> group : groups.entrySet()) {
             GameSystems.SystemDef system = GameSystems.byFolder(group.getKey());
             if (system == null) continue;
+            List<JSONObject> games = new ArrayList<>(group.getValue().values());
+            games.sort(Comparator.comparing(value -> value.optString("title"),
+                    String.CASE_INSENSITIVE_ORDER));
+            StringBuilder out = new StringBuilder(
+                    "# Generated atomically by Lucent Library Importer.\n");
             out.append("\ncollection: ").append(system.collection).append('\n');
             out.append("shortname: ").append(system.folder).append('\n');
             String launch = launchCommand(system.folder);
             if (!launch.isEmpty()) out.append("launch: ").append(launch).append('\n');
             out.append("files:\n");
-            for (JSONObject row : group.getValue())
+            for (JSONObject row : games)
                 out.append("  ").append(metadataSafe(row.optString("file"))).append('\n');
-            for (JSONObject row : group.getValue()) {
+            for (JSONObject row : games) {
                 out.append("\ngame: ").append(metadataSafe(row.optString("title"))).append('\n');
                 double userScore = row.optDouble("user", 0);
                 int userKey = userScore > 0 ? Math.max(0, 10000 - (int)Math.round(userScore * 1000)) : 99999;
@@ -1112,11 +1341,48 @@ final class ImportManager {
                             .append(row.optString("metacriticSlug")).append("/\n");
                 if (!row.optString("boxArt").isEmpty())
                     out.append("assets.boxFront: ").append(metadataSafe(row.optString("boxArt"))).append('\n');
+                if (!row.optString("background").isEmpty())
+                    out.append("assets.background: ").append(metadataSafe(row.optString("background"))).append('\n');
                 if (!row.optString("video").isEmpty())
                     out.append("assets.video: ").append(metadataSafe(row.optString("video"))).append('\n');
             }
+            String generatedName = "99-lucent-auto-" + system.folder +
+                    ".metadata.pegasus.txt";
+            activeGeneratedFiles.add(generatedName);
+            writeTextAtomic(new File(AUTO_METADATA.getParentFile(), generatedName),
+                    out.toString());
+            writeTextAtomic(new File(PEGASUS, generatedName), out.toString());
         }
-        writeTextAtomic(AUTO_METADATA, out.toString());
+        cleanupGeneratedMetadata(AUTO_METADATA.getParentFile(), activeGeneratedFiles);
+        cleanupGeneratedMetadata(PEGASUS, activeGeneratedFiles);
+        // A Pegasus metafile represents one collection. Older Lucent builds
+        // placed several collection headers in this combined file, causing
+        // every imported game to appear in every system. Leave a harmless
+        // marker at the old path while the per-system files above own games.
+        String retired = "# Retired combined Lucent metadata; per-system files are authoritative.\n";
+        writeTextAtomic(AUTO_METADATA, retired);
+        writeTextAtomic(LEGACY_AUTO_METADATA, retired);
+    }
+
+    private static void cleanupGeneratedMetadata(File directory, Set<String> keep) {
+        File[] files = directory.listFiles((dir, name) ->
+                name.startsWith("99-lucent-auto-") &&
+                        name.endsWith(".metadata.pegasus.txt") &&
+                        !name.equals(AUTO_METADATA.getName()));
+        if (files == null) return;
+        for (File file : files)
+            if (!keep.contains(file.getName())) file.delete();
+    }
+
+    private static int metadataQuality(JSONObject value) {
+        int quality = value.optInt("enrichmentVersion", 0) * 100;
+        if (!value.optString("boxArt").isEmpty()) quality += 20;
+        if (!value.optString("background").isEmpty()) quality += 12;
+        if (!value.optString("video").isEmpty()) quality += 10;
+        if (value.optInt("critic", 0) > 0) quality += 5;
+        if (value.optDouble("user", 0) > 0) quality += 3;
+        if (!value.optString("release").isEmpty()) quality += 2;
+        return quality;
     }
 
     private String launchCommand(String system) {
@@ -1208,7 +1474,6 @@ final class ImportManager {
             if ("xci".equals(ext) && containsAt(readRange(file, 0x100, 0x20), 0, "HEAD")) return GameSystems.byFolder("switch");
             if ("nsp".equals(ext) && starts(head, "PFS0".getBytes())) return GameSystems.byFolder("switch");
             if (("3ds".equals(ext) || "cci".equals(ext)) && containsAt(head, 0x100, "NCSD")) return GameSystems.byFolder("n3ds");
-            if ("3dsx".equals(ext) && starts(head, "3DSX".getBytes())) return GameSystems.byFolder("n3ds");
             if ("cia".equals(ext) && little32(head, 0) >= 0x2020 && little32(head, 0) < 0x10000) return GameSystems.byFolder("n3ds");
             if ("vpk".equals(ext) && validVitaPackage(file)) return GameSystems.byFolder("psvita");
             if ("pbp".equals(ext) && starts(head, new byte[]{0x00,0x50,0x42,0x50})) return GameSystems.byFolder("psp");
@@ -1299,6 +1564,14 @@ final class ImportManager {
         return result;
     }
 
+    private static JSONObject registeredGame(JSONArray registry, String identity) {
+        for (int i = 0; i < registry.length(); i++) {
+            JSONObject row = registry.optJSONObject(i);
+            if (row != null && identity.equals(row.optString("sourceIdentity"))) return row;
+        }
+        return null;
+    }
+
     private static JSONArray mergeRegistry(JSONArray registry, List<ImportedGame> games) {
         Map<String, JSONObject> byIdentity = new LinkedHashMap<>();
         for (int i = 0; i < registry.length(); i++) {
@@ -1362,6 +1635,7 @@ final class ImportManager {
         final String title;
         final File rom;
         String boxArt = "";
+        String background = "";
         String video = "";
         String release = "";
         String metacriticSlug = "";
@@ -1378,16 +1652,61 @@ final class ImportManager {
         int metacriticReviews;
         int gamerankingsReviews;
         boolean archived;
+        boolean enriched;
         ImportedGame(Candidate candidate, File rom) {
             this.system = candidate.system; this.sourceIdentity = candidate.identity;
             this.title = candidate.title; this.rom = rom;
         }
+
+        private ImportedGame(GameSystems.SystemDef system, String sourceIdentity,
+                             String title, File rom) {
+            this.system = system; this.sourceIdentity = sourceIdentity;
+            this.title = title; this.rom = rom;
+        }
+
+        static ImportedGame fromJson(JSONObject value) {
+            GameSystems.SystemDef system = GameSystems.byFolder(value.optString("system"));
+            File rom = new File(value.optString("file"));
+            if (system == null || !rom.isFile()) return null;
+            ImportedGame game = new ImportedGame(system,
+                    value.optString("sourceIdentity"), cleanTitle(value.optString("title")), rom);
+            game.boxArt = value.optString("boxArt");
+            game.background = value.optString("background");
+            game.video = value.optString("video");
+            game.release = value.optString("release");
+            game.metacriticSlug = value.optString("metacriticSlug");
+            game.scoreSource = value.optString("scoreSource");
+            game.gamerankingsUrl = value.optString("gamerankingsUrl");
+            game.mobygamesUrl = value.optString("mobygamesUrl");
+            game.user = value.optDouble("user", 0);
+            game.gamerankingsScore = value.optDouble("gamerankingsScore", 0);
+            game.mobygamesScore = value.optDouble("mobygamesScore", 0);
+            game.critic = value.optInt("critic", 0);
+            game.metacriticCritic = value.optInt("metacriticCritic", 0);
+            game.metacriticReviews = value.optInt("metacriticReviews", 0);
+            game.gamerankingsReviews = value.optInt("gamerankingsReviews", 0);
+            game.archived = value.optBoolean("archived", false);
+            game.enriched = value.optInt("enrichmentVersion", 0) >= 2;
+            copyJsonStrings(value.optJSONArray("developers"), game.developers);
+            copyJsonStrings(value.optJSONArray("publishers"), game.publishers);
+            return game;
+        }
+
+        private static void copyJsonStrings(JSONArray values, List<String> destination) {
+            if (values == null) return;
+            for (int i = 0; i < values.length(); i++) {
+                String value = values.optString(i, "").trim();
+                if (!value.isEmpty()) destination.add(value);
+            }
+        }
+
         JSONObject toJson() {
             JSONObject value = new JSONObject();
             try {
                 value.put("sourceIdentity", sourceIdentity); value.put("system", system.folder);
                 value.put("title", title); value.put("file", rom.getAbsolutePath());
-                value.put("boxArt", boxArt); value.put("video", video);
+                value.put("boxArt", boxArt); value.put("background", background);
+                value.put("video", video);
                 value.put("user", user); value.put("critic", critic);
                 value.put("release", release); value.put("metacriticSlug", metacriticSlug);
                 value.put("scoreSource", scoreSource);
@@ -1398,6 +1717,7 @@ final class ImportManager {
                 value.put("gamerankingsUrl", gamerankingsUrl);
                 value.put("mobygamesScore", mobygamesScore);
                 value.put("mobygamesUrl", mobygamesUrl);
+                value.put("enrichmentVersion", enriched ? 2 : 0);
                 value.put("archived", archived);
                 value.put("archiveReason", archived ? "missing-box-art" : "");
                 value.put("forceInclude", false);
@@ -1499,6 +1819,11 @@ final class ImportManager {
     }
     private static String cleanTitle(String value) {
         String title = value.replace('_', ' ').trim();
+        // Switch dumps commonly append a 16-digit title ID and version tag.
+        // They are identifiers, not part of the display title, and prevent
+        // exact media/score matching if retained.
+        title = title.replaceAll("(?i)\\s*\\[[0-9a-f]{16}\\]", "")
+                .replaceAll("(?i)\\s*\\[v\\d+\\]", "").trim();
         String previous;
         do {
             previous = title;
@@ -1652,7 +1977,16 @@ final class ImportManager {
         }
     }
     private static void writeJsonAtomic(File target, JSONArray value) throws Exception { writeTextAtomic(target, value.toString(2)+"\n"); }
-    private static List<String> splitStanzas(String text) { List<String> values=new ArrayList<>(); for(String item:text.split("\\n\\s*\\n"))if(!item.trim().isEmpty())values.add(item.trim()); return values; }
+    private static List<String> splitStanzas(String text) {
+        List<String> values = new ArrayList<>();
+        // Hand-authored and older generated Pegasus metadata commonly starts
+        // the next game immediately after the previous asset field, without a
+        // blank separator. Treat every column-zero `game:` as a record boundary
+        // in addition to accepting conventional blank-line stanzas.
+        for (String item : text.split("(?m)(?=^game:)|\\n\\s*\\n"))
+            if (!item.trim().isEmpty()) values.add(item.trim());
+        return values;
+    }
     private static String joinStanzas(List<String> values) { StringBuilder out=new StringBuilder(); for(String value:values){if(out.length()>0)out.append("\n\n");out.append(value.trim());}return out.append('\n').toString(); }
     private static String field(String stanza, String key) { String prefix=key+":"; for(String line:stanza.split("\\n"))if(line.startsWith(prefix))return line.substring(prefix.length()).trim(); return ""; }
     private static String removeField(String stanza, String key) { String prefix=key+":"; StringBuilder out=new StringBuilder(); for(String line:stanza.split("\\n")){if(line.startsWith(prefix))continue;if(out.length()>0)out.append('\n');out.append(line);}return out.toString(); }

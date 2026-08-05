@@ -37,7 +37,28 @@ final class UpdateManager {
     private JSONObject status = status("idle", 0, "Updater ready", false, false);
     private volatile JSONObject latest;
 
-    UpdateManager(Context context) { this.context = context.getApplicationContext(); }
+    UpdateManager(Context context) {
+        this.context = context.getApplicationContext();
+        // A process can be killed while a network request is in flight. Never
+        // resurrect that persisted progress state as though work were still
+        // running: there is no worker left to complete it. Terminal states are
+        // safe to restore; interrupted work becomes an explicit retry state.
+        android.content.SharedPreferences saved =
+                this.context.getSharedPreferences("updates-ui", 0);
+        String previous = saved.getString("state", "idle");
+        boolean interrupted = "checking".equals(previous) ||
+                "theme".equals(previous) || "software".equals(previous);
+        if (interrupted) {
+            setStatus("interrupted", 1,
+                    "Previous update check was interrupted — tap Check for Updates to retry",
+                    false, false);
+        } else if (!"idle".equals(previous)) {
+            setStatus(previous, 1,
+                    saved.getString("message", "Updater ready"),
+                    saved.getBoolean("appAvailable", false),
+                    saved.getBoolean("installReady", false));
+        }
+    }
 
     void checkAsync(boolean userInitiated) {
         if (!running.compareAndSet(false, true)) return;
@@ -98,8 +119,7 @@ final class UpdateManager {
                 StandardCharsets.UTF_8));
         latest = manifest;
         String remoteTheme = manifest.optString("themeVersion", "");
-        boolean themeNew = !remoteTheme.isEmpty() &&
-                !remoteTheme.equals(ThemeInstaller.installedVersion());
+        boolean themeNew = isVersionNewer(remoteTheme, ThemeInstaller.installedVersion());
         int currentCode = currentVersionCode();
         int remoteCode = manifest.optInt("companionVersionCode", currentCode);
         boolean appNew = remoteCode > currentCode;
@@ -136,6 +156,26 @@ final class UpdateManager {
             PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
             return Build.VERSION.SDK_INT >= 28 ? (int) info.getLongVersionCode() : info.versionCode;
         } catch (Exception ignored) { return 0; }
+    }
+
+    private static boolean isVersionNewer(String candidate, String installed) {
+        if (candidate == null || candidate.trim().isEmpty()) return false;
+        if (installed == null || installed.trim().isEmpty()) return true;
+        String[] left = candidate.trim().split("[^0-9]+");
+        String[] right = installed.trim().split("[^0-9]+");
+        int count = Math.max(left.length, right.length);
+        for (int index = 0; index < count; index++) {
+            int a = versionPart(left, index);
+            int b = versionPart(right, index);
+            if (a != b) return a > b;
+        }
+        return false;
+    }
+
+    private static int versionPart(String[] parts, int index) {
+        if (index >= parts.length || parts[index].isEmpty()) return 0;
+        try { return Integer.parseInt(parts[index]); }
+        catch (NumberFormatException ignored) { return 0; }
     }
 
     private File updateFile() {
@@ -206,6 +246,16 @@ final class UpdateManager {
         synchronized (statusLock) {
             status = status(state, progress, message, appAvailable, installReady);
         }
+        // The dashboard and foreground service are separate Android
+        // components. Persist the small terminal/progress state so the visible
+        // checklist never depends on a localhost timing race to turn green.
+        context.getSharedPreferences("updates-ui", 0).edit()
+                .putString("state", state)
+                .putString("message", message)
+                .putLong("updatedAt", System.currentTimeMillis())
+                .putBoolean("appAvailable", appAvailable)
+                .putBoolean("installReady", installReady)
+                .apply();
     }
 
     private static JSONObject status(String state, double progress, String message,

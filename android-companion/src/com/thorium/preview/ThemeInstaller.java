@@ -30,6 +30,8 @@ final class ThemeInstaller {
     private static final String ASSET_VERSION = "pegasus-lucent-version.txt";
     private static final File PEGASUS = new File(Environment.getExternalStorageDirectory(),
             "pegasus-frontend");
+    private static final File PEGASUS_CONFIG = new File(Environment.getExternalStorageDirectory(),
+            "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
     private static final File THEME = new File(PEGASUS, "themes/lucent");
     private static final File VERSION = new File(THEME, ".lucent-version");
 
@@ -63,6 +65,11 @@ final class ThemeInstaller {
                         installZip(input, bundled);
                     }
                 }
+                // Enforce Lucent's ROM-only provider configuration on every
+                // companion launch, even when the theme version itself is
+                // already current. Pegasus settings can otherwise be changed
+                // independently and Android applications reappear as games.
+                selectTheme();
             } catch (java.io.FileNotFoundException missingOptionalAsset) {
                 // Development builds may intentionally omit the large theme bundle.
             } catch (Exception error) {
@@ -139,23 +146,40 @@ final class ThemeInstaller {
     }
 
     private static void selectTheme() throws Exception {
-        File settings = new File(PEGASUS, "settings.txt");
+        // Modern Pegasus Android builds keep runtime settings under their
+        // app-specific external directory. Update that real config as well as
+        // the legacy shared path, and disable the Android Apps provider: Lucent
+        // is deliberately a ROM library, never an application launcher.
+        updateSettings(new File(PEGASUS_CONFIG, "settings.txt"));
+        updateSettings(new File(PEGASUS, "settings.txt"));
+    }
+
+    private static void updateSettings(File settings) throws Exception {
         List<String> lines = new ArrayList<>();
-        boolean replaced = false;
+        boolean themeReplaced = false;
+        boolean appsReplaced = false;
         if (settings.isFile()) {
             try (BufferedReader reader = new BufferedReader(new FileReader(settings))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.startsWith("general.theme:")) {
-                        if (!replaced) {
+                        if (!themeReplaced) {
                             lines.add("general.theme: " + THEME.getAbsolutePath() + "/");
-                            replaced = true;
+                            themeReplaced = true;
+                        }
+                    } else if (line.startsWith("providers.androidapps.enabled:")) {
+                        if (!appsReplaced) {
+                            lines.add("providers.androidapps.enabled: false");
+                            appsReplaced = true;
                         }
                     } else lines.add(line);
                 }
             }
         }
-        if (!replaced) lines.add(0, "general.theme: " + THEME.getAbsolutePath() + "/");
+        if (!themeReplaced) lines.add(0, "general.theme: " + THEME.getAbsolutePath() + "/");
+        if (!appsReplaced) lines.add("providers.androidapps.enabled: false");
+        File parent = settings.getParentFile();
+        if (parent != null) parent.mkdirs();
         File temporary = new File(settings.getParentFile(), ".settings.lucent.tmp");
         try (FileWriter writer = new FileWriter(temporary, false)) {
             for (String line : lines) writer.write(line + "\n");

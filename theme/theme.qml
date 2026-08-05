@@ -9,6 +9,8 @@ FocusScope {
     width: 1920
     height: 1080
 
+    readonly property string lucentVersion: "3.0.12"
+
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
     property bool previewReady: false
@@ -73,7 +75,12 @@ FocusScope {
     // neighboring collection.
     property int activeSystemIndex: 0
     property bool allSystemsActive: false
-    property int activeGameSystemIndex: systemIndexForGame(activeGame)
+    property int activeGameSystemIndex: {
+        // ListModel contents are dynamic. Referencing count makes this binding
+        // re-evaluate after startup discovery appends the detected systems.
+        var modelDependency = systemModel.count
+        return systemIndexForGame(activeGame)
+    }
     property int shelfDisplaySystemIndex: page === "home" && homeZone > 0 ?
             activeGameSystemIndex : -1
     property int displaySystemIndex: {
@@ -187,6 +194,7 @@ FocusScope {
                 folder === "psp" || folder === "psvita")
             return "sony"
         if (folder === "windows") return "microsoft"
+        if (folder === "pcenginecd") return ""
         return "nintendo"
     }
 
@@ -262,6 +270,25 @@ FocusScope {
         return null
     }
 
+    function rebuildVisibleSystems() {
+        while (systemModel.count > 1)
+            systemModel.remove(systemModel.count - 1)
+        for (var index = 1; index < systemCatalog.count; ++index) {
+            var definition = systemCatalog.get(index)
+            var collection = collectionNamed(definition.collectionName)
+            if (!collection || collection.games.count <= 0)
+                continue
+            systemModel.append({
+                "name": definition.name,
+                "years": definition.years,
+                "mark": definition.mark,
+                "collectionName": definition.collectionName,
+                "folder": definition.folder,
+                "accent": definition.accent
+            })
+        }
+    }
+
     function recentGame(index) {
         if (index < 0 || index >= recentModel.count)
             return null
@@ -306,6 +333,33 @@ FocusScope {
             }
         }
         return -1
+    }
+
+    function isLucentLibraryGame(game) {
+        // Pegasus exposes installed Android applications through api.allGames.
+        // Lucent is a ROM library: the built-in Android provider is never a
+        // game source. Keep real ROM collections visible even before a custom
+        // rail card/logo has been added for a newly detected platform.
+        if (!game || !game.collections || game.collections.count <= 0)
+            return false
+        for (var index = 0; index < game.collections.count; ++index) {
+            var name = String(game.collections.get(index).name || "").toLowerCase()
+            if (name === "android" || name === "android apps" ||
+                    name === "applications" || name === "apps")
+                return false
+        }
+        return true
+    }
+
+    function romGameCount() {
+        // Referencing count keeps this binding reactive when Pegasus reparses
+        // metadata, while the identity test excludes Applications/emulators.
+        var sourceCount = api.allGames.count
+        var count = 0
+        for (var index = 0; index < sourceCount; ++index) {
+            if (isLucentLibraryGame(api.allGames.get(index))) ++count
+        }
+        return count
     }
 
     function markForGame(game) {
@@ -1284,6 +1338,7 @@ FocusScope {
     }
 
     Component.onCompleted: {
+        rebuildVisibleSystems()
         detectPreviewCapabilities()
         systemMotionEnabled = false
         api.memory.set("thoriumSystemMotion", false)
@@ -1733,12 +1788,20 @@ FocusScope {
 
     ListModel {
         id: systemModel
+        // All Systems is always present. Physical system cards are appended
+        // from the catalog only when Pegasus actually found ROMs for them.
+        ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
+    }
+
+    ListModel {
+        id: systemCatalog
         // Chronological by first retail release. Years describe the primary
         // hardware/product lifecycle rather than online-service availability.
         ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
         ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#ffb454" }
         ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#ff5c6c" }
         ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#24c7d9" }
+        ListElement { name: "PC ENGINE CD"; years: "1988–1999"; mark: "PCE CD"; collectionName: "NEC PC Engine CD"; folder: "pcenginecd"; accent: "#f2d35f" }
         ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#ff5c6c" }
         ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#24c7d9" }
         ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#ff5c6c" }
@@ -1750,13 +1813,13 @@ FocusScope {
         ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#ff5c6c" }
         ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#ff5c6c" }
         ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#ff5c6c" }
-        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PSP"; folder: "psp"; accent: "#6f8cff" }
+        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; accent: "#6f8cff" }
         ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; accent: "#6f8cff" }
         ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#ff5c6c" }
         ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#ff5c6c" }
         ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; accent: "#6f8cff" }
         ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#ff5c6c" }
-        ListElement { name: "WINDOWS 10"; years: "2015–2025"; mark: "WIN"; collectionName: "Windows 10"; folder: "windows"; accent: "#54d98c" }
+        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#54d98c" }
         ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#ff5c6c" }
     }
 
@@ -1787,7 +1850,12 @@ FocusScope {
         id: recentModel
         sourceModel: api.allGames
         sorters: RoleSorter { roleName: "lastPlayed"; sortOrder: Qt.DescendingOrder }
-        filters: RangeFilter { roleName: "playCount"; minimumValue: 1 }
+        filters: [
+            RangeFilter { roleName: "playCount"; minimumValue: 1 },
+            ExpressionFilter {
+                expression: root.isLucentLibraryGame(api.allGames.get(index))
+            }
+        ]
     }
 
     SortFilterProxyModel {
@@ -1797,7 +1865,12 @@ FocusScope {
             RoleSorter { roleName: "playCount"; sortOrder: Qt.DescendingOrder },
             RoleSorter { roleName: "lastPlayed"; sortOrder: Qt.DescendingOrder }
         ]
-        filters: RangeFilter { roleName: "playCount"; minimumValue: 1 }
+        filters: [
+            RangeFilter { roleName: "playCount"; minimumValue: 1 },
+            ExpressionFilter {
+                expression: root.isLucentLibraryGame(api.allGames.get(index))
+            }
+        ]
     }
 
     SortFilterProxyModel {
@@ -1809,19 +1882,30 @@ FocusScope {
             RoleSorter { roleName: "rating"; sortOrder: Qt.DescendingOrder },
             RoleSorter { roleName: "sortBy"; sortOrder: Qt.AscendingOrder }
         ]
-        filters: RangeFilter { roleName: "rating"; minimumValue: 0.01 }
+        filters: [
+            RangeFilter { roleName: "rating"; minimumValue: 0.01 },
+            ExpressionFilter {
+                expression: root.isLucentLibraryGame(api.allGames.get(index))
+            }
+        ]
     }
 
     SortFilterProxyModel {
         id: gameSortModel
         sourceModel: root.allSystemsActive ? api.allGames :
                      (root.activeCollection ? root.activeCollection.games : null)
-        filters: RegExpFilter {
-            roleName: "title"
-            pattern: root.searchQuery === "" ? ".*" :
-                     root.escapedSearchPattern(root.searchQuery)
-            caseSensitivity: Qt.CaseInsensitive
-        }
+        filters: [
+            RegExpFilter {
+                roleName: "title"
+                pattern: root.searchQuery === "" ? ".*" :
+                         root.escapedSearchPattern(root.searchQuery)
+                caseSensitivity: Qt.CaseInsensitive
+            },
+            ExpressionFilter {
+                enabled: root.allSystemsActive
+                expression: root.isLucentLibraryGame(api.allGames.get(index))
+            }
+        ]
         // All four paths stay inside the native proxy model. Critic uses the
         // metadata rating role; user uses a persistent score key in sortBy.
         // This removes thousands of interpreted JS comparisons on entry.
@@ -2207,12 +2291,15 @@ FocusScope {
     Item {
         id: singleScreenPip
         z: 80
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.topMargin: 112
-        anchors.rightMargin: 56
-        width: 520
-        height: 292
+        // Single-screen list mode reserves the upper-right quadrant for the
+        // preview. The list gives up two rows (nine -> seven), so the movie can
+        // be substantially larger without covering a title, score, sort
+        // control, or game row. Dual-screen Thor geometry is untouched because
+        // this item is disabled there.
+        x: parent.width - width - 56
+        y: 102
+        width: root.page === "games" && root.gameViewMode === "list" ? 624 : 392
+        height: Math.round(width * 9 / 16)
         visible: root.previewPlacementMode !== "off" &&
                  !root.useBottomPreview() && root.singleCurrentSlot >= 0
         clip: true
@@ -2485,6 +2572,40 @@ FocusScope {
                 }
             }
 
+            Rectangle {
+                id: lucentSettingsButton
+                anchors.right: searchControl.left
+                anchors.rightMargin: 14
+                anchors.verticalCenter: parent.verticalCenter
+                width: 168
+                height: 40
+                color: root.settingsOpen ? root.accent : "#b3090d14"
+                border.width: 1
+                border.color: root.settingsOpen ? Qt.lighter(root.accent, 1.18) : "#4cffffff"
+                radius: 20
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "LUCENT SETTINGS"
+                    color: root.settingsOpen ? "#05070b" : "#eef1f6"
+                    font.family: global.fonts.sans
+                    font.pixelSize: 14
+                    font.weight: Font.Bold
+                    font.letterSpacing: 0.7
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    onClicked: {
+                        root.endSearch()
+                        root.settingsOpen = true
+                        root.settingsIndex = 0
+                        root.forceActiveFocus()
+                    }
+                }
+            }
+
             Connections {
                 target: Qt.inputMethod
                 onVisibleChanged: {
@@ -2535,7 +2656,7 @@ FocusScope {
                 y: 225
                 visible: root.homeZone === 0
                 text: systemRail.currentIndex === 0 ?
-                      api.allGames.count + " TITLES ACROSS EVERY SYSTEM" :
+                      root.romGameCount() + " TITLES ACROSS EVERY SYSTEM" :
                       (root.selectedCollection ? root.selectedCollection.games.count + " TITLES" : "READY FOR YOUR LIBRARY")
                 color: root.accent
                 font.family: global.fonts.sans
@@ -2678,6 +2799,7 @@ FocusScope {
                     }
 
                     Image {
+                        id: systemLogo
                         x: 12
                         // Vertically center the wordmark in the clear space
                         // between the accent stroke and the year label.
@@ -2686,7 +2808,7 @@ FocusScope {
                         height: 96
                         source: model.folder === "all" ? "" :
                                 Qt.resolvedUrl("assets/logos-png/" + model.folder + ".png")
-                        visible: model.folder !== "all"
+                        visible: model.folder !== "all" && status !== Image.Error
                         fillMode: Image.PreserveAspectFit
                         horizontalAlignment: model.folder === "windows" ?
                                 Image.AlignLeft : Image.AlignHCenter
@@ -2703,8 +2825,8 @@ FocusScope {
                         y: 34
                         width: parent.width - 24
                         height: 88
-                        visible: model.folder === "all"
-                        text: "ALL\nSYSTEMS"
+                        visible: model.folder === "all" || systemLogo.status === Image.Error
+                        text: model.folder === "all" ? "ALL\nSYSTEMS" : model.mark
                         color: "#f4f7fc"
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
@@ -2908,7 +3030,12 @@ FocusScope {
             Text {
                 x: 58
                 y: 180
-                width: parent.width - 116
+                // On a one-screen handheld, reserve the top-right preview's
+                // footprint so long game titles and facts never render under
+                // the PIP, including the larger single-screen list preview.
+                width: !root.dualScreenDevice ?
+                       parent.width - 116 - singleScreenPip.width - 46 :
+                       parent.width - 116
                 height: 68
                 text: root.activeGame ? root.activeGame.title :
                       (root.searchQuery !== "" ? "NO MATCHING GAMES" : "NO GAMES YET")
@@ -3152,12 +3279,11 @@ FocusScope {
             Item {
                 id: listViewPanel
                 x: 48
-                y: 324
+                y: !root.dualScreenDevice ? 484 : 324
                 width: parent.width - 96
-                // Nine exact 76px rows plus eight 4px gaps. Keeping the
-                // viewport on the 80px row cadence prevents a fractional row
-                // from being clipped at the top once selection is centered.
-                height: 716
+                // Thor keeps nine rows. A one-display handheld keeps seven,
+                // freeing exactly two row cadences for the top-right PIP.
+                height: !root.dualScreenDevice ? 556 : 716
                 visible: root.gameViewMode === "list"
 
                 Item {
@@ -3351,7 +3477,7 @@ FocusScope {
         anchors.rightMargin: 62
         y: 1040
         visible: root.page === "home" && !root.settingsOpen
-        text: "X / Y  DISPLAY SETTINGS     D-PAD  NAVIGATE     A  OPEN"
+        text: "X / Y  LUCENT SETTINGS     D-PAD  NAVIGATE     A  OPEN"
         color: "#7f899c"
         font.family: global.fonts.sans
         font.pixelSize: 15
@@ -3399,7 +3525,8 @@ FocusScope {
             Text {
                 x: 50
                 y: 94
-                text: "Display changes apply instantly; updates also run automatically at startup"
+                text: "LUCENT " + root.lucentVersion +
+                      "  •  Display changes apply instantly; updates run automatically at startup"
                 color: "#9da7b8"
                 font.family: global.fonts.sans
                 font.pixelSize: 17

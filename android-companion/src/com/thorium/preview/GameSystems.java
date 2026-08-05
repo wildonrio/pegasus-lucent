@@ -142,7 +142,10 @@ final class GameSystems {
                 "ps3 playstation3 sonyplaystation3", "", "PlayStation 3", "playstation-3");
         add("wii", "Nintendo Wii", "Nintendo - Wii", "wbfs rvz iso wad",
                 "wii nintendowii", "nintendo-wii-video-snaps", "Wii", "wii");
-        add("n3ds", "Nintendo 3DS", "Nintendo - Nintendo 3DS", "3ds 3dsx cia cci",
+        // .3dsx is an executable homebrew-application format, not a dumped
+        // retail game format. Including it caused utilities such as Universal
+        // Updater to appear in the game library.
+        add("n3ds", "Nintendo 3DS", "Nintendo - Nintendo 3DS", "3ds cia cci",
                 "n3ds 3ds nintendo3ds", "nintendo-3ds-video-snaps", "3DS", "3ds");
         add("psvita", "Sony PlayStation Vita", "Sony - PlayStation Vita", "vpk",
                 "psvita vita playstationvita sonyplaystationvita", "", 
