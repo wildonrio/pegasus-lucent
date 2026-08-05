@@ -1,14 +1,14 @@
 {
   "product": "Pegasus Lucent",
-  "themeVersion": "3.0.14",
-  "companionVersionCode": 44,
-  "companionVersionName": "3.0.14",
-  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.14/pegasus-lucent.apk",
-  "companionSha256": "88c41119942d47d8017e478020904bd358111e9e4b0720ca59c2be9cd1a933ac",
+  "themeVersion": "3.0.15",
+  "companionVersionCode": 45,
+  "companionVersionName": "3.0.15",
+  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.15/pegasus-lucent.apk",
+  "companionSha256": "bc810150ce676641fb1c5d473998adfb75ba516e96214e7b5cc84be400a88f5f",
   "controllerVersionCode": 20,
   "controllerVersionName": "1.17",
-  "controllerApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.14/pegasus-lucent-controller.apk",
+  "controllerApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.15/pegasus-lucent-controller.apk",
   "controllerSha256": "003c7959983fba0101d9b969d19774cf63df1366999b2d0119c2c0f46fdd112b",
-  "themeZipUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.14/pegasus-lucent-theme.zip",
-  "themeSha256": "3e549a6bb66c541cbcc61279df1f8267d60c06f212f6cb9d2da35eaf5416f2c8"
+  "themeZipUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.15/pegasus-lucent-theme.zip",
+  "themeSha256": "a148402d532300dc13a3fdf6b5ec1c756cb2f0bf2a66975a1dfbbf68440b3aa9"
 }

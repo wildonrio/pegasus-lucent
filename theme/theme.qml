@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.14"
+    readonly property string lucentVersion: "3.0.15"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -3455,16 +3455,17 @@ FocusScope {
                 Item {
                     id: selectedGameArtPanel
                     x: 0
-                    y: 106
+                    y: 0
                     width: 600
-                    height: parent.height - 106
+                    height: parent.height
                     property real coverAspect: listCover.status === Image.Ready &&
                             listCover.sourceSize.height > 0 ?
                             listCover.sourceSize.width / listCover.sourceSize.height : 0.72
-                    // Fit against both axes. Tall covers used to use only the
-                    // width constraint and extend below the Flip 2 display.
-                    property real coverWidth: Math.min(520, 510 * coverAspect,
-                                                       Math.max(1, height - 18) * coverAspect)
+                    // Use equal outer padding on every side and center within
+                    // the entire list panel. The former 106 px top inset made
+                    // every cover appear visibly low on a single-screen Flip.
+                    property real coverWidth: Math.min(Math.max(1, width - 36),
+                                                       Math.max(1, height - 36) * coverAspect)
                     property real coverHeight: coverWidth / coverAspect
 
                     Image {

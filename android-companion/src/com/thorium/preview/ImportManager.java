@@ -65,6 +65,11 @@ final class ImportManager {
             "99-lucent-auto-import.metadata.pegasus.txt");
     private static final File LEGACY_AUTO_METADATA = new File(PEGASUS,
             "99-lucent-auto-import.metadata.pegasus.txt");
+    private static final File THORIUM_LEGACY_AUTO_METADATA = new File(PEGASUS,
+            "99-thorium-auto-import.metadata.pegasus.txt");
+    private static final File THORIUM_LEGACY_CONFIG_METADATA = new File(
+            new File(PEGASUS_CONFIG, "metafiles"),
+            "99-thorium-auto-import.metadata.pegasus.txt");
     private static final long RESCAN_THROTTLE_MS = 45_000L;
     private static final long MISS_RETRY_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final Pattern HREF = Pattern.compile("href=\"([^\"]+\\.(?:png|jpg|jpeg))\"",
@@ -282,6 +287,12 @@ final class ImportManager {
 
     private void runScan(boolean fullDiscovery) throws Exception {
         PEGASUS.mkdirs();
+        // Thorium's retired combined metafile can coexist with Lucent's
+        // per-system files after an in-place upgrade. Pegasus then exposes a
+        // second, stale copy of every imported game; most of those old rows do
+        // not contain video paths. Remove only our generated legacy files.
+        THORIUM_LEGACY_AUTO_METADATA.delete();
+        THORIUM_LEGACY_CONFIG_METADATA.delete();
         File metadataParent = AUTO_METADATA.getParentFile();
         if (metadataParent != null) metadataParent.mkdirs();
         GAMES.mkdirs();
@@ -1230,6 +1241,10 @@ final class ImportManager {
             values.add("akumajou dracula x chi no rondo");
             values.add(scoreAlias("akumajou dracula x chi no rondo"));
         }
+        // The PS2 archive catalogs the North American KOF 2002 disc under
+        // the retail 2002/2003 two-disc compilation name.
+        if (relaxed.startsWith("king of fighters 2002"))
+            values.add("kingoffighters20022003usadisc1");
         if (relaxed.startsWith("the ")) {
             values.add(relaxed.substring(4));
             values.add(scoreAlias(relaxed.substring(4)));
@@ -1427,8 +1442,7 @@ final class ImportManager {
         JSONObject root = new JSONObject(json);
         JSONArray files = root.optJSONArray("files");
         if (files == null) return null;
-        String key = normalize(title);
-        String alias = scoreAlias(key);
+        Set<String> aliases = mediaAliases(title);
         String selected = null;
         for (int i = 0; i < files.length(); i++) {
             JSONObject item = files.optJSONObject(i);
@@ -1436,7 +1450,13 @@ final class ImportManager {
             if (!name.toLowerCase(Locale.US).endsWith(".mp4") ||
                     name.toLowerCase(Locale.US).endsWith(".ia.mp4")) continue;
             String candidate = normalize(stem(name));
-            if (candidate.equals(key) || scoreAlias(candidate).equals(alias)) {
+            String compact = scoreAlias(candidate);
+            // EmuMovies-style archive filenames commonly append a packed
+            // region/disc marker (for example TonyHawksProSkater3usa.mp4).
+            String withoutArchiveSuffix = compact.replaceFirst(
+                    "(?:usa|us|world|europe|eu|japan)(?:disc[0-9]+)?$", "");
+            if (aliases.contains(candidate) || aliases.contains(compact) ||
+                    aliases.contains(withoutArchiveSuffix)) {
                 if (selected == null || regionRank(name) < regionRank(selected)) selected = name;
             }
         }
