@@ -479,7 +479,8 @@ final class ImportManager {
                     titles, imported.size(), !imported.isEmpty());
             for (ImportedGame game : mediaRepairs) {
                 boolean missingBoxBefore = missingMediaFile(game.boxArt);
-                boolean missingBackgroundBefore = missingMediaFile(game.background);
+                boolean missingBackgroundBefore = missingMediaFile(game.background) ||
+                        !wallpaperCanvasIsValid(new File(game.background));
                 if (missingBoxBefore) enrichBoxArt(game, cacheRoot, mediaRoot);
                 if (missingBackgroundBefore) enrichBackground(game, cacheRoot, mediaRoot);
                 if (missingBoxBefore && !missingMediaFile(game.boxArt)) registryMediaRepaired++;
