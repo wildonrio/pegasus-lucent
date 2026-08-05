@@ -870,8 +870,8 @@ final class ImportManager {
                 File folder = new File(mediaRoot,
                         "game-wallpapers-launchbox-fanart/" + game.system.folder);
                 File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
-                if (downloadAndCrop16x9(launchBox.url, target, cacheRoot,
-                        64L * 1024L * 1024L)) {
+                if (acceptWallpaper(downloadAndCrop16x9(launchBox.url, target, cacheRoot,
+                        64L * 1024L * 1024L), target)) {
                     game.background = target.getAbsolutePath();
                     game.backgroundSource = BACKGROUND_SOURCE_LAUNCHBOX;
                     game.backgroundSourceUrl = launchBox.url;
@@ -888,8 +888,8 @@ final class ImportManager {
                 File folder = new File(mediaRoot,
                         "game-wallpapers-official-gallery/" + game.system.folder);
                 File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
-                if (downloadAndCrop16x9(official.background, target, cacheRoot,
-                        64L * 1024L * 1024L)) {
+                if (acceptWallpaper(downloadAndCrop16x9(official.background, target, cacheRoot,
+                        64L * 1024L * 1024L), target)) {
                     game.background = target.getAbsolutePath();
                     game.backgroundSource = BACKGROUND_SOURCE_OFFICIAL;
                     game.backgroundSourceUrl = official.background;
@@ -909,8 +909,8 @@ final class ImportManager {
                 File folder = new File(mediaRoot,
                         "game-wallpapers-screenshot-fallback/" + game.system.folder);
                 File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
-                if (downloadAndCrop16x9(screenshot.url, target, cacheRoot,
-                        64L * 1024L * 1024L)) {
+                if (acceptWallpaper(downloadAndCrop16x9(screenshot.url, target, cacheRoot,
+                        64L * 1024L * 1024L), target)) {
                     game.background = target.getAbsolutePath();
                     game.backgroundSource = BACKGROUND_SOURCE_SCREENSHOT;
                     game.backgroundSourceUrl = screenshot.url;
@@ -929,6 +929,17 @@ final class ImportManager {
         } catch (Exception error) {
             Log.w(TAG, "Wallpaper unavailable for " + game.title, error);
         }
+    }
+
+    private static boolean acceptWallpaper(boolean downloaded, File target) {
+        if (!downloaded) return false;
+        if (wallpaperCanvasIsValid(target)) return true;
+        // Never let a dimensionally correct but visually padded canvas become
+        // durable state. Leaving it in place would make every later scan
+        // detect and "repair" the same file again.
+        if (target.isFile() && !target.delete())
+            Log.w(TAG, "Unable to remove rejected wallpaper " + target);
+        return false;
     }
 
     private static boolean downloadAndCrop16x9(String url, File target, File cacheRoot,
