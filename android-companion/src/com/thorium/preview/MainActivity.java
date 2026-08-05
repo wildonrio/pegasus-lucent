@@ -256,8 +256,7 @@ public final class MainActivity extends Activity {
             String message = message(response, "Lucent is ready");
             try {
                 JSONObject value = new JSONObject(response);
-                if (!value.optBoolean("running", false) &&
-                        !"available".equals(value.optString("state"))) return;
+                if ("idle".equals(value.optString("state"))) return;
             } catch (Exception ignored) { return; }
             runOnUiThread(() -> activityStatus.setText(message));
         }, "lucent-dashboard-status");

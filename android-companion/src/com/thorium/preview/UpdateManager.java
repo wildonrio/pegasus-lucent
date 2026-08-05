@@ -63,7 +63,12 @@ final class UpdateManager {
     void installDownloadedApk() {
         try {
             File apk = updateFile();
-            if (!apk.isFile()) return;
+            if (!apk.isFile()) {
+                setStatus("complete", 1,
+                        "No downloaded update is available — run Check for Updates first",
+                        false, false);
+                return;
+            }
             if (Build.VERSION.SDK_INT >= 26 &&
                     !context.getPackageManager().canRequestPackageInstalls()) {
                 Intent permission = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
