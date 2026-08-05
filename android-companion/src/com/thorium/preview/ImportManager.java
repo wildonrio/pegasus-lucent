@@ -1919,6 +1919,13 @@ final class ImportManager {
                 putStringIfMissing(row, "gamefaqsUrl", field(stanza, "x-gamefaqs-url"));
                 putStringIfMissing(row, "userSources", field(stanza, "x-user-sources"));
                 putStringIfMissing(row, "criticSources", field(stanza, "x-critic-sources"));
+                // Media repairs are applied to the exact ROM stanza after a
+                // deeper provider audit. Preserve those paths just like the
+                // enriched scores; otherwise a later startup scan can rebuild
+                // an auto metafile from a thinner registry and erase them.
+                putStringIfMissing(row, "boxArt", field(stanza, "assets.boxFront"));
+                putStringIfMissing(row, "background", field(stanza, "assets.background"));
+                putStringIfMissing(row, "video", field(stanza, "assets.video"));
             } catch (Exception ignored) {}
         }
         return addedRows;

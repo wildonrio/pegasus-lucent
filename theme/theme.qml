@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.19"
+    readonly property string lucentVersion: "3.0.20"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -428,8 +428,17 @@ FocusScope {
         upperArtworkPreloadNext.source = artwork(nextGame)
 
         var requested = String(artwork(game) || "")
-        if (!requested)
+        if (!requested) {
+            // A missing wallpaper is a real state, not a slow load. Hide both
+            // decoded buffers immediately so the neutral platform backdrop
+            // underneath is revealed. Keeping the old slot visible here made
+            // the previous game's artwork look as though it belonged to the
+            // newly selected title.
+            upperArtworkTarget = ""
+            upperArtworkPendingSlot = -1
+            upperArtworkSlot = -1
             return
+        }
         var activeLayer = upperArtworkLayer(upperArtworkSlot)
         if (activeLayer && String(activeLayer.source) === requested) {
             // Rapidly moving away and straight back can leave a later request
