@@ -211,10 +211,20 @@ final class ImportManager {
         if (identity == null || identity.isEmpty() || title.isEmpty()) return false;
         JSONArray registry = readRegistry();
         boolean changed = false;
+        File originalRom = null;
+        File renamedRom = null;
         for (int i = 0; i < registry.length(); i++) {
             JSONObject row = registry.optJSONObject(i);
             if (row == null || !identity.equals(row.optString("sourceIdentity"))) continue;
             try {
+                originalRom = new File(row.optString("file"));
+                String extension = extension(originalRom.getName());
+                renamedRom = new File(originalRom.getParentFile(), safeFilename(title) +
+                        (extension.isEmpty() ? "" : "." + extension));
+                if (!originalRom.equals(renamedRom)) {
+                    if (renamedRom.exists() || !originalRom.renameTo(renamedRom)) return false;
+                    row.put("file", renamedRom.getAbsolutePath());
+                }
                 row.put("title", title);
                 changed = true;
             } catch (Exception ignored) {}
@@ -226,6 +236,8 @@ final class ImportManager {
             writeMetadata(registry);
             return true;
         } catch (Exception error) {
+            if (originalRom != null && renamedRom != null && renamedRom.isFile() &&
+                    !originalRom.isFile()) renamedRom.renameTo(originalRom);
             Log.e(TAG, "Unable to rename game", error);
             return false;
         }
@@ -269,6 +281,13 @@ final class ImportManager {
 
     private static File storageVolumeRoot(File file) {
         String path = file.getAbsolutePath();
+        // /storage/emulated is a framework mount, not the writable user
+        // volume. Trying to create /storage/emulated/.LucentTrash made every
+        // delete of an internally stored game fail. The actual shared-storage
+        // root is /storage/emulated/0 (Environment's external directory).
+        String internal = Environment.getExternalStorageDirectory().getAbsolutePath();
+        if (path.equals(internal) || path.startsWith(internal + File.separator))
+            return Environment.getExternalStorageDirectory();
         if (path.startsWith("/storage/")) {
             int slash = path.indexOf('/', "/storage/".length());
             if (slash > 0) return new File(path.substring(0, slash));
@@ -515,9 +534,12 @@ final class ImportManager {
             if (!file.isFile() || file.getName().startsWith(".") || isPartial(file.getName())) continue;
             String extension = extension(file.getName());
             if ("zip".equals(extension)) {
+                if (isSwitchSupplementalName(file.getName())) continue;
                 found.addAll(inspectZip(file, cacheRoot));
                 continue;
             }
+            if (isSwitchExtension(extension) && isSwitchSupplementalName(file.getAbsolutePath()))
+                continue;
             GameSystems.SystemDef system = identify(file, extension);
             if (system == null) continue;
             String title = cleanTitle(stem(file.getName()));
@@ -562,6 +584,8 @@ final class ImportManager {
             String path = canonical(entry.getAbsolutePath());
             if (referenced.contains(path)) continue;
             String ext = extension(entry.getName());
+            if (isSwitchExtension(ext) && isSwitchSupplementalName(entry.getAbsolutePath()))
+                continue;
             GameSystems.SystemDef system = GameSystems.byPath(entry);
             if (system == null) system = identify(entry, ext);
             if (system == null) system = GameSystems.unambiguousByExtension(ext);
@@ -622,6 +646,8 @@ final class ImportManager {
         String name = directory.getName().toLowerCase(Locale.US);
         return name.startsWith(".") || name.contains("backup") || name.contains("quarantine") ||
                 "saves".equals(name) || "save".equals(name) ||
+                "update".equals(name) || "updates".equals(name) ||
+                "dlc".equals(name) || "add-on".equals(name) || "add-ons".equals(name) ||
                 "android".equals(name) || "download".equals(name) ||
                 "downloads".equals(name) || "pegasusmedia".equals(name) ||
                 "pegasus-frontend".equals(name) || "dcim".equals(name) ||
@@ -700,6 +726,8 @@ final class ImportManager {
         try (ZipFile zip = new ZipFile(archive)) {
             zip.stream().filter(entry -> !entry.isDirectory()).forEach(entry -> {
                 String ext = extension(entry.getName());
+                if (isSwitchExtension(ext) && (isSwitchSupplementalName(archive.getName()) ||
+                        isSwitchSupplementalName(entry.getName()))) return;
                 if (GameSystems.unambiguousByExtension(ext) == null &&
                         !isPotentialAmbiguous(ext)) return;
                 File temporary = new File(staging, sha1(archive.getAbsolutePath() + "!" + entry.getName()) +
@@ -790,12 +818,26 @@ final class ImportManager {
 
     private void enrichBackground(ImportedGame game, File cacheRoot, File mediaRoot) {
         try {
+            File pipelineFolder = new File(mediaRoot, "game-wallpapers/" + game.system.folder);
+            String digestPrefix = sha1(game.rom.getAbsolutePath());
+            File pipeline = new File(pipelineFolder, digestPrefix + ".jpg");
+            if (!pipeline.isFile()) {
+                File[] longerDigest = pipelineFolder.listFiles((directory, name) ->
+                        name.startsWith(digestPrefix) && name.toLowerCase(Locale.US).endsWith(".jpg"));
+                if (longerDigest != null && longerDigest.length == 1) pipeline = longerDigest[0];
+            }
+            if (pipeline.isFile() && pipeline.length() > 512) {
+                game.background = pipeline.getAbsolutePath();
+                return;
+            }
             CatalogMatch match = null;
             NintendoMedia official = nintendoMedia(game.system, game.title, cacheRoot);
             if (official != null && !official.background.isEmpty())
                 match = new CatalogMatch(official.background, game.title);
-            if (match == null)
-                match = catalogMatch(game.system, game.title, cacheRoot, "Named_Snaps");
+            // Never use gameplay screenshots as wallpapers. If a provider has
+            // no actual promotional/fan-art background, leave this unset for
+            // the wallpaper pipeline instead of disguising a game capture as
+            // a backdrop.
             if (match == null) return;
             File folder = new File(mediaRoot, "background/" + game.system.folder);
             folder.mkdirs();
@@ -1227,6 +1269,10 @@ final class ImportManager {
                 .replace(" the the ", " the ");
         values.add(relaxed);
         values.add(scoreAlias(relaxed));
+        String articleless = relaxed.replaceAll("\\b(?:the|a|an)\\b", " ")
+                .replaceAll("\\s+", " ").trim();
+        values.add(articleless);
+        values.add(scoreAlias(articleless));
         String sourceTitle = cleanTitle(title);
         int sourceColon = sourceTitle.indexOf(':');
         if (sourceColon > 3) {
@@ -1411,11 +1457,31 @@ final class ImportManager {
                 7L * 24L * 60L * 60L * 1000L, 32L * 1024L * 1024L);
         Set<String> keys = mediaAliases(title);
         List<String> exact = new ArrayList<>();
+        String requestedVariantText = decode(title).toLowerCase(Locale.US);
         Matcher matcher = HREF.matcher(html);
         while (matcher.find()) {
             String href = matcher.group(1);
-            String candidate = normalize(stem(decode(href)));
-            if (keys.contains(candidate) || keys.contains(scoreAlias(candidate))) exact.add(href);
+            String decodedCandidate = decode(href);
+            String candidateVariantText = decodedCandidate.toLowerCase(Locale.US);
+            // Parenthetical stripping makes retail and demo/kiosk/prototype
+            // releases normalize to the same key. Never let a special build
+            // rename a normal retail ROM unless the source title explicitly
+            // requested that same variant.
+            boolean unwantedVariant = false;
+            for (String variant : new String[]{"demo", "kiosk", "prototype", "proto", "beta", "sample"}) {
+                if (candidateVariantText.matches(".*\\b" + variant + "\\b.*") &&
+                        !requestedVariantText.matches(".*\\b" + variant + "\\b.*")) {
+                    unwantedVariant = true;
+                    break;
+                }
+            }
+            if (unwantedVariant) continue;
+            String candidate = normalize(stem(decodedCandidate));
+            String candidateArticleless = candidate.replaceAll("\\b(?:the|a|an)\\b", " ")
+                    .replaceAll("\\s+", " ").trim();
+            if (keys.contains(candidate) || keys.contains(scoreAlias(candidate)) ||
+                    keys.contains(candidateArticleless) || keys.contains(scoreAlias(candidateArticleless)))
+                exact.add(href);
         }
         if (exact.isEmpty()) return null;
         exact.sort((left, right) -> Integer.compare(regionRank(left), regionRank(right)));
@@ -1451,11 +1517,14 @@ final class ImportManager {
                     name.toLowerCase(Locale.US).endsWith(".ia.mp4")) continue;
             String candidate = normalize(stem(name));
             String compact = scoreAlias(candidate);
+            String articleless = candidate.replaceAll("\\b(?:the|a|an)\\b", " ")
+                    .replaceAll("\\s+", " ").trim();
             // EmuMovies-style archive filenames commonly append a packed
             // region/disc marker (for example TonyHawksProSkater3usa.mp4).
             String withoutArchiveSuffix = compact.replaceFirst(
                     "(?:usa|us|world|europe|eu|japan)(?:disc[0-9]+)?$", "");
             if (aliases.contains(candidate) || aliases.contains(compact) ||
+                    aliases.contains(articleless) || aliases.contains(scoreAlias(articleless)) ||
                     aliases.contains(withoutArchiveSuffix)) {
                 if (selected == null || regionRank(name) < regionRank(selected)) selected = name;
             }
@@ -2210,17 +2279,40 @@ final class ImportManager {
         // Switch dumps commonly append a 16-digit title ID and version tag.
         // They are identifiers, not part of the display title, and prevent
         // exact media/score matching if retained.
-        title = title.replaceAll("(?i)\\s*\\[[0-9a-f]{16}\\]", "")
+        title = title.replaceAll("(?i)[.\\s-]*[0-9a-f]{16}(?:[.\\s-]*v\\d+)?$", "")
+                .replaceAll("(?i)\\s*\\[[0-9a-f]{16}\\]", "")
                 .replaceAll("(?i)\\s*\\[v\\d+\\]", "").trim();
+        // Dot-separated scene/download names are filenames, not display
+        // titles. Canonical catalog matching can restore legitimate internal
+        // punctuation after this normalization.
+        if (title.matches(".*[A-Za-z0-9]\\.[A-Za-z0-9].*")) title = title.replace('.', ' ');
         String previous;
         do {
             previous = title;
-            title = title.replaceAll("\\s*[\\[(](?:USA|Europe|Japan|World|En(?:,[A-Za-z]+)*|Rev[^\\])]*|v?\\d+(?:\\.\\d+)*|!|b|h|t[^\\])]*)[\\])]\\s*$", "").trim();
+            title = title.replaceAll("\\s*[\\[(](?:USA|Europe|Japan|World|En(?:,[A-Za-z]+)*|Rev[^\\])]*|v?\\d+(?:[ .]\\d+)*|!|b|h|t[^\\])]*)[\\])]\\s*$", "").trim();
         } while (!title.equals(previous));
         title = title.replaceAll("\\s+-\\s+", ": ").replaceAll("\\s+", " ").trim();
         Matcher article = Pattern.compile("^(.+), (The|A|An)$", Pattern.CASE_INSENSITIVE).matcher(title);
         if (article.matches()) title = article.group(2) + " " + article.group(1);
         return title.isEmpty() ? "Untitled Game" : title;
+    }
+
+    private static boolean isSwitchExtension(String extension) {
+        return "nsp".equals(extension) || "xci".equals(extension);
+    }
+
+    private static boolean isSwitchSupplementalName(String value) {
+        String normalized = value == null ? "" : value.replace('\\', '/').toLowerCase(Locale.US);
+        if (normalized.matches(".*/(?:updates?|dlc|add-ons?)/.*")) return true;
+        String words = normalized.replaceAll("[^a-z0-9]+", " ").trim();
+        if (words.matches(".*(?:^| )(?:update|upd|dlc)(?: |$).*") ||
+                words.contains("downloadable content")) return true;
+        Matcher ids = Pattern.compile("(?i)([0-9a-f]{16})").matcher(value == null ? "" : value);
+        while (ids.find()) {
+            // Nintendo Switch update title IDs use the 0x800 program suffix.
+            if (ids.group(1).toLowerCase(Locale.US).endsWith("800")) return true;
+        }
+        return false;
     }
     private static void addUnique(List<String> values, String value) {
         String clean = value == null ? "" : value.trim();

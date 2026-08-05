@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.16"
+    readonly property string lucentVersion: "3.0.17"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
