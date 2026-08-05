@@ -306,6 +306,17 @@ public final class PreviewService extends Service {
                 boolean included = importManager.includeArchived(values.getOrDefault("id", ""));
                 respond(writer, included ? "200 OK" : "404 Not Found",
                         "{\"ok\":" + included + "}");
+            } else if ("/game/rename".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                boolean renamed = importManager.renameGame(
+                        values.getOrDefault("id", ""), values.getOrDefault("title", ""));
+                respond(writer, renamed ? "200 OK" : "404 Not Found",
+                        "{\"ok\":" + renamed + "}");
+            } else if ("/game/delete".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                boolean trashed = importManager.trashGame(values.getOrDefault("id", ""));
+                respond(writer, trashed ? "200 OK" : "404 Not Found",
+                        "{\"ok\":" + trashed + ",\"recoverable\":true}");
             } else if ("/update/check".equals(path)) {
                 updateManager.checkAsync(true);
                 respond(writer, "202 Accepted", updateManager.statusJson());

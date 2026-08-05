@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.13"
+    readonly property string lucentVersion: "3.0.14"
 
     property string page: "home"
     property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
@@ -37,6 +37,14 @@ FocusScope {
     property bool searchOpen: false
     property string searchQuery: ""
     property bool searchKeyboardAccepting: false
+    property bool gameActionOpen: false
+    property string gameActionMode: "menu"
+    property int gameActionIndex: 0
+    property var gameActionGame: null
+    property string gameActionMessage: ""
+    property var renamedGameTitles: ({})
+    property var hiddenGameIds: ({})
+    property int libraryMutationRevision: 0
     property int singleCurrentSlot: -1
     property int singleTargetSlot: -1
     property string singleSourceA: ""
@@ -537,6 +545,115 @@ FocusScope {
         return game && game.assets.video ? game.assets.video : ""
     }
 
+    function gameIdentifier(game) {
+        if (!game || !game.extra) return ""
+        return String(game.extra["lucent-id"] || game.extra.lucentId || "")
+    }
+
+    function displayTitle(game) {
+        if (!game) return ""
+        var identity = gameIdentifier(game)
+        return identity !== "" && renamedGameTitles[identity] ?
+                    renamedGameTitles[identity] : String(game.title || "")
+    }
+
+    function gameVisibleAfterMutation(game) {
+        var revisionDependency = libraryMutationRevision
+        var identity = gameIdentifier(game)
+        return identity === "" || !hiddenGameIds[identity]
+    }
+
+    function openGameActions(game, index) {
+        if (!game) return
+        gameRail.currentIndex = index
+        gameActionGame = game
+        gameActionIndex = 0
+        gameActionMode = "menu"
+        gameActionMessage = ""
+        gameActionOpen = true
+        root.forceActiveFocus()
+    }
+
+    function closeGameActions() {
+        Qt.inputMethod.reset()
+        Qt.inputMethod.hide()
+        renameField.focus = false
+        gameActionOpen = false
+        gameActionGame = null
+        gameActionMode = "menu"
+        root.forceActiveFocus()
+    }
+
+    function beginRenameGame() {
+        if (!gameActionGame || gameIdentifier(gameActionGame) === "") {
+            gameActionMessage = "This game must be imported by Lucent before it can be renamed."
+            gameActionMode = "error"
+            return
+        }
+        gameActionMode = "rename"
+        renameField.text = displayTitle(gameActionGame)
+        Qt.callLater(function() {
+            renameField.forceActiveFocus()
+            renameField.selectAll()
+            Qt.inputMethod.show()
+        })
+    }
+
+    function submitRenameGame() {
+        var title = String(renameField.text || "").trim()
+        var identity = gameIdentifier(gameActionGame)
+        if (identity === "" || title === "") return
+        Qt.inputMethod.hide()
+        renameField.focus = false
+        gameActionMode = "working"
+        gameActionMessage = "RENAMING…"
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            if (request.status === 200) {
+                root.renamedGameTitles[identity] = title
+                root.libraryMutationRevision += 1
+                root.gameActionMessage = "RENAMED"
+                root.gameActionMode = "success"
+            } else {
+                root.gameActionMessage = "RENAME FAILED"
+                root.gameActionMode = "error"
+            }
+        }
+        request.open("GET", "http://127.0.0.1:43821/game/rename?id=" +
+                     encodeURIComponent(identity) + "&title=" + encodeURIComponent(title), true)
+        request.send()
+    }
+
+    function submitDeleteGame() {
+        var identity = gameIdentifier(gameActionGame)
+        if (identity === "") {
+            gameActionMessage = "This game must be imported by Lucent before it can be deleted."
+            gameActionMode = "error"
+            return
+        }
+        gameActionMode = "working"
+        gameActionMessage = "MOVING TO LUCENT TRASH…"
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            if (request.status === 200) {
+                root.hiddenGameIds[identity] = true
+                root.libraryMutationRevision += 1
+                root.gameActionMessage = "MOVED TO LUCENT TRASH"
+                root.gameActionMode = "success"
+                gameRail.currentIndex = Math.max(0, Math.min(gameRail.currentIndex,
+                                                             gameSortModel.count - 1))
+            } else {
+                root.gameActionMessage = "DELETE FAILED"
+                root.gameActionMode = "error"
+            }
+        }
+        request.open("GET", "http://127.0.0.1:43821/game/delete?id=" +
+                     encodeURIComponent(identity), true)
+        request.send()
+    }
+
     function boxAspectForSystem(index) {
         // Width / height for the physical packaging used by each platform.
         // Games within one system always share the same visual canvas.
@@ -555,7 +672,7 @@ FocusScope {
         currentBottomPreviewSequence = previewRequestSequence
         var video = videoSource(game)
         var art = game ? artwork(game) : ""
-        var title = game ? (game.title || "") : ""
+        var title = game ? displayTitle(game) : ""
         var gameSystemIndex = systemIndexForGame(game)
         var systemName = gameSystemIndex >= 0 ? systemModel.get(gameSystemIndex).name : ""
         var score = game ? scoreText(game) : ""
@@ -1417,7 +1534,38 @@ FocusScope {
     }
 
     Keys.onPressed: {
-        if (searchField.activeFocus) {
+        if (gameActionOpen) {
+            if (gameActionMode === "rename" && renameField.activeFocus) {
+                if (api.keys.isCancel(event) || event.key === Qt.Key_Back || event.key === Qt.Key_Escape) {
+                    Qt.inputMethod.reset()
+                    Qt.inputMethod.hide()
+                    renameField.focus = false
+                    gameActionMode = "menu"
+                    root.forceActiveFocus()
+                }
+                event.accepted = true
+            } else if (gameActionMode === "menu") {
+                if (api.keys.isCancel(event) || event.key === Qt.Key_Back || event.key === Qt.Key_Escape) {
+                    closeGameActions()
+                } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down ||
+                           event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                    gameActionIndex = gameActionIndex === 0 ? 1 : 0
+                } else if (api.keys.isAccept(event)) {
+                    if (gameActionIndex === 0) beginRenameGame()
+                    else gameActionMode = "confirm-delete"
+                }
+                event.accepted = true
+            } else if (gameActionMode === "confirm-delete") {
+                if (api.keys.isCancel(event) || event.key === Qt.Key_Back || event.key === Qt.Key_Escape) gameActionMode = "menu"
+                else if (api.keys.isAccept(event)) submitDeleteGame()
+                event.accepted = true
+            } else if (gameActionMode !== "working") {
+                if (api.keys.isAccept(event) || api.keys.isCancel(event) || event.key === Qt.Key_Back || event.key === Qt.Key_Escape) closeGameActions()
+                event.accepted = true
+            } else {
+                event.accepted = true
+            }
+        } else if (searchField.activeFocus) {
             // Text and IME key events must never fall through to Pegasus's
             // controller aliases (for example, the letter A as Accept).
             if (event.nativeScanCode === 305 || event.key === Qt.Key_Back ||
@@ -1853,7 +2001,8 @@ FocusScope {
         filters: [
             RangeFilter { roleName: "playCount"; minimumValue: 1 },
             ExpressionFilter {
-                expression: root.isLucentLibraryGame(api.allGames.get(index))
+                expression: root.isLucentLibraryGame(api.allGames.get(index)) &&
+                            root.gameVisibleAfterMutation(api.allGames.get(index))
             }
         ]
     }
@@ -1868,7 +2017,8 @@ FocusScope {
         filters: [
             RangeFilter { roleName: "playCount"; minimumValue: 1 },
             ExpressionFilter {
-                expression: root.isLucentLibraryGame(api.allGames.get(index))
+                expression: root.isLucentLibraryGame(api.allGames.get(index)) &&
+                            root.gameVisibleAfterMutation(api.allGames.get(index))
             }
         ]
     }
@@ -1885,7 +2035,8 @@ FocusScope {
         filters: [
             RangeFilter { roleName: "rating"; minimumValue: 0.01 },
             ExpressionFilter {
-                expression: root.isLucentLibraryGame(api.allGames.get(index))
+                expression: root.isLucentLibraryGame(api.allGames.get(index)) &&
+                            root.gameVisibleAfterMutation(api.allGames.get(index))
             }
         ]
     }
@@ -1904,6 +2055,11 @@ FocusScope {
             ExpressionFilter {
                 enabled: root.allSystemsActive
                 expression: root.isLucentLibraryGame(api.allGames.get(index))
+            },
+            ExpressionFilter {
+                expression: root.gameVisibleAfterMutation(
+                    root.allSystemsActive ? api.allGames.get(index) :
+                    (root.activeCollection ? root.activeCollection.games.get(index) : null))
             }
         ]
         // All four paths stay inside the native proxy model. Critic uses the
@@ -1969,7 +2125,7 @@ FocusScope {
                 y: 270
                 width: parent.width - 16
                 height: 48
-                text: game ? game.title : ""
+                text: root.displayTitle(game)
                 color: "#eef1f7"
                 elide: Text.ElideRight
                 wrapMode: Text.Wrap
@@ -2001,7 +2157,14 @@ FocusScope {
 
             MouseArea {
                 anchors.fill: parent
+                pressAndHoldInterval: 800
+                onPressAndHold: {
+                    ListView.view.currentIndex = index
+                    root.focusHomeZone(ListView.view.zone)
+                    root.openGameActions(game, index)
+                }
                 onClicked: {
+                    if (root.gameActionOpen) return
                     ListView.view.currentIndex = index
                     root.focusHomeZone(ListView.view.zone)
                     root.launch(game)
@@ -2197,7 +2360,7 @@ FocusScope {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 650
             width: 1380
-            text: root.activeGame ? root.activeGame.title : systemModel.get(root.displaySystemIndex).name
+            text: root.activeGame ? root.displayTitle(root.activeGame) : systemModel.get(root.displaySystemIndex).name
             color: "#dce2ee"
             opacity: 0.22
             horizontalAlignment: Text.AlignHCenter
@@ -2685,7 +2848,7 @@ FocusScope {
                 y: 148
                 width: parent.width - 116
                 visible: root.homeZone > 0
-                text: root.activeGame ? root.activeGame.title : "CONTINUE PLAYING"
+                text: root.activeGame ? root.displayTitle(root.activeGame) : "CONTINUE PLAYING"
                 color: "white"
                 font.family: global.fonts.condensed
                 font.pixelSize: 60
@@ -3037,7 +3200,7 @@ FocusScope {
                        parent.width - 116 - singleScreenPip.width - 46 :
                        parent.width - 116
                 height: 68
-                text: root.activeGame ? root.activeGame.title :
+                text: root.activeGame ? root.displayTitle(root.activeGame) :
                       (root.searchQuery !== "" ? "NO MATCHING GAMES" : "NO GAMES YET")
                 color: "white"
                 font.family: global.fonts.condensed
@@ -3236,7 +3399,7 @@ FocusScope {
                         y: 354
                         width: parent.width - 24
                         height: 46
-                        text: game ? game.title : ""
+                        text: root.displayTitle(game)
                         color: "#f1f3f8"
                         wrapMode: Text.Wrap
                         maximumLineCount: 2
@@ -3268,7 +3431,10 @@ FocusScope {
 
                     MouseArea {
                         anchors.fill: parent
+                        pressAndHoldInterval: 800
+                        onPressAndHold: root.openGameActions(game, index)
                         onClicked: {
+                            if (root.gameActionOpen) return
                             gameRail.currentIndex = index
                             root.launch(game)
                         }
@@ -3295,7 +3461,10 @@ FocusScope {
                     property real coverAspect: listCover.status === Image.Ready &&
                             listCover.sourceSize.height > 0 ?
                             listCover.sourceSize.width / listCover.sourceSize.height : 0.72
-                    property real coverWidth: Math.min(520, 510 * coverAspect)
+                    // Fit against both axes. Tall covers used to use only the
+                    // width constraint and extend below the Flip 2 display.
+                    property real coverWidth: Math.min(520, 510 * coverAspect,
+                                                       Math.max(1, height - 18) * coverAspect)
                     property real coverHeight: coverWidth / coverAspect
 
                     Image {
@@ -3314,7 +3483,7 @@ FocusScope {
                         anchors.centerIn: parent
                         width: parent.width - 80
                         visible: root.activeGame && !root.activeGame.assets.boxFront
-                        text: root.activeGame ? root.activeGame.title : ""
+                        text: root.activeGame ? root.displayTitle(root.activeGame) : ""
                         color: "#e8ebf2"
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
@@ -3422,7 +3591,7 @@ FocusScope {
                             x: 78
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width - 590
-                            text: game ? game.title : ""
+                            text: root.displayTitle(game)
                             color: gameListRow.isSelected ? "#03050a" : "#eef1f6"
                             elide: Text.ElideRight
                             font.family: global.fonts.sans
@@ -3447,7 +3616,10 @@ FocusScope {
 
                         MouseArea {
                             anchors.fill: parent
+                            pressAndHoldInterval: 800
+                            onPressAndHold: root.openGameActions(game, index)
                             onClicked: {
+                                if (root.gameActionOpen) return
                                 gameRail.currentIndex = index
                                 root.launch(game)
                             }
@@ -3461,7 +3633,7 @@ FocusScope {
                 anchors.rightMargin: 62
                 y: 1040
                 text: "L1 / R1  SORT     L2 / R2  SYSTEM     X / Y  VIEW: " + root.gameViewMode.toUpperCase() +
-                      "     D-PAD  NAVIGATE     B  BACK     A  PLAY"
+                      "     D-PAD  NAVIGATE     B  BACK     A  PLAY     HOLD GAME  OPTIONS"
                 color: "#7f899c"
                 font.family: global.fonts.sans
                 font.pixelSize: 15
@@ -3489,6 +3661,222 @@ FocusScope {
             onClicked: {
                 root.settingsOpen = true
                 root.settingsIndex = 0
+            }
+        }
+    }
+
+    Rectangle {
+        id: gameActionOverlay
+        z: 700
+        anchors.fill: parent
+        visible: root.gameActionOpen
+        color: "#e805080d"
+
+        MouseArea { anchors.fill: parent }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 820
+            height: 520
+            color: "#fb0d121a"
+            border.width: 2
+            border.color: root.accent
+            radius: 10
+
+            Text {
+                x: 44
+                y: 38
+                width: parent.width - 88
+                text: root.displayTitle(root.gameActionGame)
+                color: "white"
+                elide: Text.ElideRight
+                font.family: global.fonts.condensed
+                font.pixelSize: 40
+                font.weight: Font.Bold
+            }
+
+            Text {
+                x: 46
+                y: 94
+                text: root.gameActionMode === "menu" ? "GAME OPTIONS" :
+                      root.gameActionMode === "rename" ? "RENAME GAME" :
+                      root.gameActionMode === "confirm-delete" ? "CONFIRM DELETE" : "LUCENT LIBRARY"
+                color: root.accent
+                font.family: global.fonts.sans
+                font.pixelSize: 17
+                font.weight: Font.Bold
+                font.letterSpacing: 2
+            }
+
+            Item {
+                anchors.fill: parent
+                visible: root.gameActionMode === "menu"
+
+                Rectangle {
+                    x: 44
+                    y: 150
+                    width: parent.width - 88
+                    height: 108
+                    color: root.gameActionIndex === 0 ? root.accent : "#b3121822"
+                    border.width: root.gameActionIndex === 0 ? 2 : 1
+                    border.color: root.gameActionIndex === 0 ? Qt.lighter(root.accent, 1.18) : "#42ffffff"
+                    radius: 7
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "RENAME"
+                        color: root.gameActionIndex === 0 ? "#05070b" : "white"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 26
+                        font.weight: Font.Bold
+                        font.letterSpacing: 1.2
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: { root.gameActionIndex = 0; root.beginRenameGame() }
+                    }
+                }
+
+                Rectangle {
+                    x: 44
+                    y: 278
+                    width: parent.width - 88
+                    height: 108
+                    color: root.gameActionIndex === 1 ? "#ff6d70" : "#b3121822"
+                    border.width: root.gameActionIndex === 1 ? 2 : 1
+                    border.color: root.gameActionIndex === 1 ? "#ff9b9d" : "#42ffffff"
+                    radius: 7
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "DELETE"
+                        color: root.gameActionIndex === 1 ? "#120405" : "white"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 26
+                        font.weight: Font.Bold
+                        font.letterSpacing: 1.2
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: { root.gameActionIndex = 1; root.gameActionMode = "confirm-delete" }
+                    }
+                }
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 438
+                    text: "TAP AN OPTION  •  B TO CANCEL"
+                    color: "#8e98aa"
+                    font.family: global.fonts.sans
+                    font.pixelSize: 15
+                    font.letterSpacing: 1.4
+                }
+            }
+
+            Item {
+                anchors.fill: parent
+                visible: root.gameActionMode === "rename"
+
+                Rectangle {
+                    x: 44
+                    y: 164
+                    width: parent.width - 88
+                    height: 72
+                    color: "#d9080c13"
+                    border.width: 2
+                    border.color: root.accent
+                    radius: 7
+
+                    TextInput {
+                        id: renameField
+                        anchors.fill: parent
+                        anchors.leftMargin: 22
+                        anchors.rightMargin: 22
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: "white"
+                        selectionColor: root.accent
+                        selectedTextColor: "#05070b"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 25
+                        selectByMouse: true
+                        inputMethodHints: Qt.ImhNoPredictiveText
+                        onAccepted: root.submitRenameGame()
+                    }
+                }
+
+                Rectangle {
+                    x: 44
+                    y: 272
+                    width: parent.width - 88
+                    height: 84
+                    color: root.accent
+                    radius: 7
+                    Text {
+                        anchors.centerIn: parent
+                        text: "SAVE NAME"
+                        color: "#05070b"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 24
+                        font.weight: Font.Bold
+                    }
+                    MouseArea { anchors.fill: parent; onClicked: root.submitRenameGame() }
+                }
+            }
+
+            Item {
+                anchors.fill: parent
+                visible: root.gameActionMode === "confirm-delete"
+
+                Text {
+                    x: 54
+                    y: 164
+                    width: parent.width - 108
+                    text: "Remove this game from Lucent and move the ROM to the hidden .LucentTrash folder?"
+                    color: "#e9edf4"
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    font.family: global.fonts.sans
+                    font.pixelSize: 24
+                }
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: 294
+                    spacing: 20
+                    Rectangle {
+                        width: 330; height: 82; color: "#b3121822"; border.width: 1
+                        border.color: "#52ffffff"; radius: 7
+                        Text { anchors.centerIn: parent; text: "CANCEL"; color: "white"; font.pixelSize: 23; font.bold: true }
+                        MouseArea { anchors.fill: parent; onClicked: root.gameActionMode = "menu" }
+                    }
+                    Rectangle {
+                        width: 330; height: 82; color: "#ff6d70"; radius: 7
+                        Text { anchors.centerIn: parent; text: "DELETE GAME"; color: "#150405"; font.pixelSize: 23; font.bold: true }
+                        MouseArea { anchors.fill: parent; onClicked: root.submitDeleteGame() }
+                    }
+                }
+            }
+
+            Item {
+                anchors.fill: parent
+                visible: root.gameActionMode === "working" ||
+                         root.gameActionMode === "success" || root.gameActionMode === "error"
+                Text {
+                    anchors.centerIn: parent
+                    width: parent.width - 110
+                    text: root.gameActionMessage
+                    color: root.gameActionMode === "error" ? "#ff8588" : root.accent
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    font.family: global.fonts.condensed
+                    font.pixelSize: 34
+                    font.weight: Font.Bold
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: root.gameActionMode !== "working"
+                    onClicked: root.closeGameActions()
+                }
             }
         }
     }

@@ -201,6 +201,85 @@ final class ImportManager {
         }
     }
 
+    synchronized boolean renameGame(String identity, String requestedTitle) {
+        String title = cleanTitle(requestedTitle == null ? "" : requestedTitle);
+        if (identity == null || identity.isEmpty() || title.isEmpty()) return false;
+        JSONArray registry = readRegistry();
+        boolean changed = false;
+        for (int i = 0; i < registry.length(); i++) {
+            JSONObject row = registry.optJSONObject(i);
+            if (row == null || !identity.equals(row.optString("sourceIdentity"))) continue;
+            try {
+                row.put("title", title);
+                changed = true;
+            } catch (Exception ignored) {}
+            break;
+        }
+        if (!changed) return false;
+        try {
+            writeJsonAtomic(REGISTRY, registry);
+            writeMetadata(registry);
+            return true;
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to rename game", error);
+            return false;
+        }
+    }
+
+    synchronized boolean trashGame(String identity) {
+        if (identity == null || identity.isEmpty()) return false;
+        JSONArray registry = readRegistry();
+        int found = -1;
+        JSONObject row = null;
+        for (int i = 0; i < registry.length(); i++) {
+            JSONObject candidate = registry.optJSONObject(i);
+            if (candidate != null && identity.equals(candidate.optString("sourceIdentity"))) {
+                found = i;
+                row = candidate;
+                break;
+            }
+        }
+        if (found < 0 || row == null) return false;
+        File rom = new File(row.optString("file"));
+        if (!rom.isFile()) return false;
+        File volume = storageVolumeRoot(rom);
+        File trash = new File(new File(volume, ".LucentTrash"),
+                row.optString("system", "unknown"));
+        if (!trash.mkdirs() && !trash.isDirectory()) return false;
+        File target = uniqueTrashTarget(trash, rom.getName());
+        if (!rom.renameTo(target)) return false;
+        try {
+            registry.remove(found);
+            writeJsonAtomic(REGISTRY, registry);
+            writeMetadata(registry);
+            return true;
+        } catch (Exception error) {
+            // Restore the ROM if metadata could not be committed. A failed UI
+            // operation must never leave a game silently detached from Pegasus.
+            target.renameTo(rom);
+            Log.e(TAG, "Unable to move game to Lucent trash", error);
+            return false;
+        }
+    }
+
+    private static File storageVolumeRoot(File file) {
+        String path = file.getAbsolutePath();
+        if (path.startsWith("/storage/")) {
+            int slash = path.indexOf('/', "/storage/".length());
+            if (slash > 0) return new File(path.substring(0, slash));
+        }
+        return Environment.getExternalStorageDirectory();
+    }
+
+    private static File uniqueTrashTarget(File directory, String name) {
+        File target = new File(directory, name);
+        if (!target.exists()) return target;
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String extension = dot > 0 ? name.substring(dot) : "";
+        return new File(directory, base + "-" + System.currentTimeMillis() + extension);
+    }
+
     private void runScan(boolean fullDiscovery) throws Exception {
         PEGASUS.mkdirs();
         File metadataParent = AUTO_METADATA.getParentFile();
@@ -1557,6 +1636,8 @@ final class ImportManager {
                 else
                     out.append("rating: 0%\n");
                 out.append("file: ").append(metadataSafe(row.optString("file"))).append('\n');
+                out.append("x-lucent-id: ")
+                        .append(metadataSafe(row.optString("sourceIdentity"))).append('\n');
                 appendMetadataList(out, "developer", row.optJSONArray("developers"));
                 appendMetadataList(out, "publisher", row.optJSONArray("publishers"));
                 if (userScore > 0) {
@@ -1658,22 +1739,27 @@ final class ImportManager {
 
     private String launchCommand(String system) {
         if (("gc".equals(system) || "wii".equals(system)) && installed("org.dolphinemu.dolphinemu"))
-            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
-                    "-n org.dolphinemu.dolphinemu/.ui.main.MainActivity --activity-clear-top";
+            return "am start --user 0 -a android.intent.action.VIEW " +
+                    "-n org.dolphinemu.dolphinemu/.ui.main.MainActivity " +
+                    "--es AutoStartFile \"{file.path}\" --activity-clear-top";
         if ("ps2".equals(system)) {
             if (installed("com.armsx2"))
                 return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
                         "-n com.armsx2/.BootSplashActivity --activity-clear-top";
             if (installed("xyz.aethersx2.android"))
-                return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
-                        "-n xyz.aethersx2.android/.MainActivity --activity-clear-top";
+                return "am start --user 0 -n xyz.aethersx2.android/.EmulationActivity " +
+                        "--es bootPath \"{file.path}\" --activity-clear-top";
         }
         if ("switch".equals(system) && installed("dev.legacy.eden_emulator"))
-            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
-                    "-n dev.legacy.eden_emulator/org.yuzu.yuzu_emu.ui.main.MainActivity --activity-clear-top";
+            return "am start --user 0 -a com.thorium.preview.LAUNCH_FILE " +
+                    "-n com.thorium.preview/.RomLaunchActivity --es path \"{file.path}\" " +
+                    "--es target_package dev.legacy.eden_emulator " +
+                    "--es target_activity org.yuzu.yuzu_emu.activities.EmulationActivity --activity-clear-top";
         if ("wiiu".equals(system) && installed("info.cemu.cemu"))
-            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
-                    "-n info.cemu.cemu/.MainActivity --activity-clear-top";
+            return "am start --user 0 -a com.thorium.preview.LAUNCH_FILE " +
+                    "-n com.thorium.preview/.RomLaunchActivity --es path \"{file.path}\" " +
+                    "--es target_package info.cemu.cemu " +
+                    "--es target_activity info.cemu.cemu.emulation.EmulationActivity --activity-clear-top";
         if ("psx".equals(system) && installed("com.github.stenzek.duckstation"))
             return "am start --user 0 -n com.github.stenzek.duckstation/.EmulationActivity " +
                     "--es bootPath \"{file.path}\" --activity-clear-top";

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.thorium.preview"
-    android:versionCode="43"
-    android:versionName="3.0.13">
+    android:versionCode="44"
+    android:versionName="3.0.14">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -41,6 +41,11 @@
             android:screenOrientation="landscape"
             android:exported="true" />
 
+        <activity
+            android:name=".RomLaunchActivity"
+            android:excludeFromRecents="true"
+            android:exported="true" />
+
         <service
             android:name=".PreviewService"
             android:exported="true" />
@@ -51,12 +56,19 @@
             android:exported="false"
             android:grantUriPermissions="true" />
 
+        <provider
+            android:name=".RomFileProvider"
+            android:authorities="com.thorium.preview.roms"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
     </application>
