@@ -568,6 +568,18 @@ public final class PreviewActivity extends Activity {
                     prepared = true;
                     mediaPlayer.start();
                 });
+                // setLooping(true) is normally sufficient, but several Android
+                // vendor MediaPlayer builds have been observed to emit completion
+                // at the end of local MP4s instead. Treat completion as a hard
+                // loop boundary so a preview can never stop on its last frame.
+                player.setOnCompletionListener(mediaPlayer -> {
+                    try {
+                        mediaPlayer.seekTo(0);
+                        mediaPlayer.start();
+                    } catch (Exception error) {
+                        Log.w("ThorPreview", "Unable to restart looping preview " + path, error);
+                    }
+                });
                 player.setOnInfoListener((mediaPlayer, what, extra) -> {
                     if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
                         firstFrameRendered = true;

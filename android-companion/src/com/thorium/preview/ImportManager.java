@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,9 +68,13 @@ final class ImportManager {
             "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
     private static final File REGISTRY = new File(PEGASUS, "thorium-imports.json");
     private static final String BACKGROUND_SOURCE_WALLPAPER = "audited-wallpaper";
+    private static final String BACKGROUND_SOURCE_LAUNCHBOX = "launchbox-fanart-background";
     private static final String BACKGROUND_SOURCE_OFFICIAL = "official-gallery-image";
     private static final String BACKGROUND_SOURCE_SCREENSHOT = "exact-gameplay-screenshot";
     private static final String BACKGROUND_TRANSFORM = "center-crop-1920x1080-no-stretch";
+    private static final Map<String, Boolean> WALLPAPER_QUALITY_CACHE =
+            new ConcurrentHashMap<>();
+    private static volatile boolean wallpaperQualityCacheLoaded;
     private static final File AUTO_METADATA = new File(new File(PEGASUS_CONFIG, "metafiles"),
             "99-lucent-auto-import.metadata.pegasus.txt");
     private static final File LEGACY_AUTO_METADATA = new File(PEGASUS,
@@ -666,6 +671,7 @@ final class ImportManager {
     private static boolean shouldSkipLibraryDirectory(File directory) {
         String name = directory.getName().toLowerCase(Locale.US);
         return name.startsWith(".") || name.contains("backup") || name.contains("quarantine") ||
+                name.contains("trash") ||
                 "saves".equals(name) || "save".equals(name) ||
                 "update".equals(name) || "updates".equals(name) ||
                 "dlc".equals(name) || "add-on".equals(name) || "add-ons".equals(name) ||
@@ -847,11 +853,30 @@ final class ImportManager {
                         name.startsWith(digestPrefix) && name.toLowerCase(Locale.US).endsWith(".jpg"));
                 if (longerDigest != null && longerDigest.length == 1) pipeline = longerDigest[0];
             }
-            if (pipeline.isFile() && pipeline.length() > 512) {
+            if (pipeline.isFile() && pipeline.length() > 512 && wallpaperCanvasIsValid(pipeline)) {
                 game.background = pipeline.getAbsolutePath();
                 if (game.backgroundSource.isEmpty())
                     game.backgroundSource = BACKGROUND_SOURCE_WALLPAPER;
                 return;
+            }
+
+            // LaunchBox exposes exact per-game Fanart - Background assets. The
+            // result page is matched by both normalized title and platform;
+            // only the dedicated fanart class is accepted (never box fronts,
+            // banners, or a fuzzy title result).
+            CatalogMatch launchBox = launchBoxFanartMatch(game.system, game.title, cacheRoot);
+            if (launchBox != null) {
+                File folder = new File(mediaRoot,
+                        "game-wallpapers-launchbox-fanart/" + game.system.folder);
+                File target = new File(folder, sha1(game.rom.getAbsolutePath()) + ".jpg");
+                if (downloadAndCrop16x9(launchBox.url, target, cacheRoot,
+                        64L * 1024L * 1024L)) {
+                    game.background = target.getAbsolutePath();
+                    game.backgroundSource = BACKGROUND_SOURCE_LAUNCHBOX;
+                    game.backgroundSourceUrl = launchBox.url;
+                    game.backgroundTransform = BACKGROUND_TRANSFORM;
+                    return;
+                }
             }
 
             // Prefer an exact, first-party gallery image before falling back
@@ -958,6 +983,137 @@ final class ImportManager {
         bounds.inJustDecodeBounds = true;
         BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
         return bounds.outWidth == 1920 && bounds.outHeight == 1080;
+    }
+
+    /**
+     * Reject a common false-positive: a 16:9 file that merely embeds narrower
+     * cover/key art between blurred or flat padding bands. Dimensions alone
+     * cannot distinguish it from a real wallpaper. This deliberately analyzes
+     * a tiny sampled bitmap and memoizes by path/size/mtime so library audits do
+     * not turn navigation into image-decoding work.
+     */
+    private static boolean wallpaperCanvasIsValid(File file) {
+        if (!isExact1080p(file)) return false;
+        loadWallpaperQualityCache();
+        String cacheKey = file.getAbsolutePath() + ':' + file.length() + ':' + file.lastModified();
+        Boolean cached = WALLPAPER_QUALITY_CACHE.get(cacheKey);
+        if (cached != null) return cached;
+
+        Bitmap sample = null;
+        boolean valid = true;
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            options.inSampleSize = 16;
+            sample = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            if (sample == null || sample.getWidth() < 80 || sample.getHeight() < 45) {
+                valid = false;
+            } else {
+                int width = sample.getWidth();
+                int height = sample.getHeight();
+                float[] rowDetail = new float[height];
+                float[] rowSeam = new float[Math.max(1, height - 1)];
+                int[] row = new int[width];
+                int[] previousLuma = new int[width];
+                for (int y = 0; y < height; y++) {
+                    sample.getPixels(row, 0, width, 0, y, width, 1);
+                    long activity = 0L;
+                    long verticalActivity = 0L;
+                    for (int x = 1; x < width; x++) {
+                        int left = row[x - 1];
+                        int right = row[x];
+                        int leftLuma = (77 * ((left >> 16) & 255) +
+                                150 * ((left >> 8) & 255) + 29 * (left & 255)) >> 8;
+                        int rightLuma = (77 * ((right >> 16) & 255) +
+                                150 * ((right >> 8) & 255) + 29 * (right & 255)) >> 8;
+                        activity += Math.abs(rightLuma - leftLuma);
+                        if (y > 0) verticalActivity += Math.abs(rightLuma - previousLuma[x]);
+                        previousLuma[x] = rightLuma;
+                    }
+                    if (width > 0) {
+                        int first = row[0];
+                        int firstLuma = (77 * ((first >> 16) & 255) +
+                                150 * ((first >> 8) & 255) + 29 * (first & 255)) >> 8;
+                        if (y > 0) verticalActivity += Math.abs(firstLuma - previousLuma[0]);
+                        previousLuma[0] = firstLuma;
+                    }
+                    rowDetail[y] = activity / (float) Math.max(1, width - 1);
+                    if (y > 0) rowSeam[y - 1] = verticalActivity / (float) Math.max(1, width);
+                }
+                float top = mean(rowDetail, 0.04f, 0.22f);
+                float center = mean(rowDetail, 0.36f, 0.64f);
+                float bottom = mean(rowDetail, 0.78f, 0.96f);
+                float paddingRatio = (top + bottom) / (2f * Math.max(0.01f, center));
+                int topSeam = maxIndex(rowSeam, 0.12f, 0.42f);
+                int bottomSeam = maxIndex(rowSeam, 0.58f, 0.88f);
+                float seamMean = mean(rowSeam, 0f, 1f);
+                float seamStrength = (rowSeam[topSeam] + rowSeam[bottomSeam]) /
+                        (2f * Math.max(0.01f, seamMean));
+                int symmetry = Math.abs((topSeam + bottomSeam) - (rowSeam.length - 1));
+                boolean extremelyFlatOuterBands = center > 4.5f && paddingRatio < 0.20f;
+                boolean pairedPaddingSeams = paddingRatio < 0.55f &&
+                        seamStrength > 4.0f && symmetry < Math.max(3, height * 0.08f);
+                valid = !(extremelyFlatOuterBands || pairedPaddingSeams);
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Wallpaper canvas audit failed for " + file, error);
+            valid = false;
+        } finally {
+            if (sample != null) sample.recycle();
+        }
+        WALLPAPER_QUALITY_CACHE.put(cacheKey, valid);
+        return valid;
+    }
+
+    private static synchronized void loadWallpaperQualityCache() {
+        if (wallpaperQualityCacheLoaded) return;
+        wallpaperQualityCacheLoaded = true;
+        File cache = new File(new File(PEGASUS, ".thorium-import-cache"),
+                "wallpaper-quality.json");
+        if (!cache.isFile()) return;
+        try {
+            JSONObject saved = new JSONObject(readText(cache));
+            java.util.Iterator<String> keys = saved.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                WALLPAPER_QUALITY_CACHE.put(key, saved.optBoolean(key, false));
+            }
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to read wallpaper quality cache", error);
+        }
+    }
+
+    private static void persistWallpaperQualityCache(File cacheRoot) {
+        try {
+            JSONObject saved = new JSONObject();
+            for (Map.Entry<String, Boolean> entry : WALLPAPER_QUALITY_CACHE.entrySet())
+                saved.put(entry.getKey(), entry.getValue());
+            writeTextAtomic(new File(cacheRoot, "wallpaper-quality.json"),
+                    saved.toString(2) + "\n");
+        } catch (Exception error) {
+            Log.w(TAG, "Unable to persist wallpaper quality cache", error);
+        }
+    }
+
+    private static float mean(float[] values, float from, float to) {
+        int start = Math.max(0, Math.min(values.length - 1,
+                Math.round((values.length - 1) * from)));
+        int end = Math.max(start + 1, Math.min(values.length,
+                Math.round(values.length * to)));
+        float sum = 0f;
+        for (int i = start; i < end; i++) sum += values[i];
+        return sum / Math.max(1, end - start);
+    }
+
+    private static int maxIndex(float[] values, float from, float to) {
+        int start = Math.max(0, Math.min(values.length - 1,
+                Math.round((values.length - 1) * from)));
+        int end = Math.max(start + 1, Math.min(values.length,
+                Math.round(values.length * to)));
+        int result = start;
+        for (int i = start + 1; i < end; i++)
+            if (values[i] > values[result]) result = i;
+        return result;
     }
 
     private void enrichVideo(ImportedGame game, File cacheRoot, File mediaRoot) {
@@ -1484,6 +1640,7 @@ final class ImportManager {
 
     private static boolean needsMediaRepair(ImportedGame game) {
         return missingMediaFile(game.boxArt) || missingMediaFile(game.background) ||
+                !wallpaperCanvasIsValid(new File(game.background)) ||
                 missingMediaFile(game.video);
     }
 
@@ -1506,7 +1663,8 @@ final class ImportManager {
                     String backgroundPath = field(stanza, "assets.background");
                     String videoPath = field(stanza, "assets.video");
                     boolean needsArt = missingMediaFile(artPath);
-                    boolean needsBackground = missingMediaFile(backgroundPath);
+                    boolean needsBackground = missingMediaFile(backgroundPath) ||
+                            !wallpaperCanvasIsValid(new File(backgroundPath));
                     boolean needsVideo = missingMediaFile(videoPath);
                     if (!needsArt && !needsBackground && !needsVideo) continue;
                     GameSystems.SystemDef system = systemFromRomPath(romPath);
@@ -1563,12 +1721,95 @@ final class ImportManager {
                 Log.w(TAG, "Media audit skipped " + metadata, error);
             }
         }
+        // Persist the content audit keyed by path, size, and mtime. Subsequent
+        // launches reuse it immediately and only decode changed/new artwork.
+        persistWallpaperQualityCache(cacheRoot);
         return repaired;
     }
 
     private CatalogMatch boxArtMatch(GameSystems.SystemDef system, String title, File cacheRoot)
             throws Exception {
         return catalogMatch(system, title, cacheRoot, "Named_Boxarts");
+    }
+
+    private CatalogMatch launchBoxFanartMatch(GameSystems.SystemDef system, String title,
+                                               File cacheRoot) throws Exception {
+        File searchCache = new File(cacheRoot,
+                "launchbox-search-" + system.folder + '-' + sha1(normalize(title)) + ".html");
+        String results = cachedText(searchCache,
+                "https://gamesdb.launchbox-app.com/games/results?id=" +
+                        URLEncoder.encode(title, "UTF-8"),
+                30L * 24L * 60L * 60L * 1000L, 12L * 1024L * 1024L);
+        Pattern card = Pattern.compile(
+                "href=\"/games/details/(\\d+)-[^\"]+\".*?" +
+                        "<h3[^>]*>(.*?)</h3>\\s*<p[^>]*>(.*?)</p>",
+                Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher cards = card.matcher(results);
+        String gameId = "";
+        Set<String> requestedAliases = mediaAliases(title);
+        while (cards.find()) {
+            String candidateTitle = htmlText(cards.group(2));
+            String platform = htmlText(cards.group(3));
+            boolean exactTitle = false;
+            String normalizedCandidate = normalize(candidateTitle);
+            for (String alias : requestedAliases) {
+                if (normalizedCandidate.equals(alias)) {
+                    exactTitle = true;
+                    break;
+                }
+            }
+            if (!exactTitle || !launchBoxPlatformMatches(system, platform)) continue;
+            gameId = cards.group(1);
+            break;
+        }
+        if (gameId.isEmpty()) return null;
+
+        File imagesCache = new File(cacheRoot, "launchbox-images-" + gameId + ".html");
+        String images = cachedText(imagesCache,
+                "https://gamesdb.launchbox-app.com/games/images/" + gameId,
+                30L * 24L * 60L * 60L * 1000L, 24L * 1024L * 1024L);
+        Pattern fanart = Pattern.compile(
+                "<a\\b[^>]*href=\"(https://images\\.launchbox-app\\.com/[^\"]+)\"" +
+                        "[^>]*data-title=\"[^\"]*Fanart - Background[^\"]*\"" +
+                        "[^>]*data-footer=\"(\\d+)\\s*x\\s*(\\d+)[^\"]*\"",
+                Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher candidates = fanart.matcher(images);
+        String bestUrl = "";
+        long bestPixels = 0L;
+        while (candidates.find()) {
+            int width = Integer.parseInt(candidates.group(2));
+            int height = Integer.parseInt(candidates.group(3));
+            if (width < 960 || height < 540) continue;
+            float aspect = width / (float) height;
+            if (aspect < 1.35f || aspect > 2.35f) continue;
+            long pixels = (long) width * height;
+            if (pixels > bestPixels) {
+                bestPixels = pixels;
+                bestUrl = htmlText(candidates.group(1));
+            }
+        }
+        return bestUrl.isEmpty() ? null : new CatalogMatch(bestUrl, cleanTitle(title));
+    }
+
+    private static boolean launchBoxPlatformMatches(GameSystems.SystemDef system,
+                                                    String platform) {
+        String candidate = normalize(platform);
+        if (candidate.equals(normalize(system.collection))) return true;
+        for (String alias : system.aliases)
+            if (candidate.equals(normalize(alias))) return true;
+        // LaunchBox uses these shorter official labels for a few collections.
+        if ("megadrive".equals(system.folder)) return candidate.equals("sega genesis");
+        if ("psx".equals(system.folder)) return candidate.equals("sony playstation");
+        if ("gba".equals(system.folder)) return candidate.equals("nintendo game boy advance");
+        return false;
+    }
+
+    private static String htmlText(String value) {
+        if (value == null) return "";
+        return value.replaceAll("<[^>]+>", " ")
+                .replace("&#x27;", "'").replace("&#39;", "'")
+                .replace("&quot;", "\"").replace("&amp;", "&")
+                .replace("&nbsp;", " ").replaceAll("\\s+", " ").trim();
     }
 
     private CatalogMatch catalogMatch(GameSystems.SystemDef system, String title, File cacheRoot,
@@ -2100,6 +2341,8 @@ final class ImportManager {
             return BACKGROUND_SOURCE_SCREENSHOT;
         if (normalized.contains("/game-wallpapers-official-gallery/"))
             return BACKGROUND_SOURCE_OFFICIAL;
+        if (normalized.contains("/game-wallpapers-launchbox-fanart/"))
+            return BACKGROUND_SOURCE_LAUNCHBOX;
         if (normalized.contains("/game-wallpapers/"))
             return BACKGROUND_SOURCE_WALLPAPER;
         return "unclassified-existing-background";

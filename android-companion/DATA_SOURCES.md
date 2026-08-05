@@ -24,12 +24,15 @@ separately and never substituted for missing critic data.
 Every update scan records where each background came from. The importer uses
 this order and never borrows media from a different title or platform:
 
-1. A pre-audited wallpaper in `PegasusMedia/game-wallpapers`.
-2. An exact first-party product-gallery image when an official provider exists.
-3. An exact-title libretro `Named_Snaps` gameplay screenshot as the last resort.
+1. A pre-audited wallpaper in `PegasusMedia/game-wallpapers` (including the
+   exact-title SteamGridDB hero and TheGamesDB fanart pipeline).
+2. Exact-platform, exact-title LaunchBox `Fanart - Background` media.
+3. An exact first-party product-gallery image when an official provider exists.
+4. An exact-title libretro `Named_Snaps` gameplay screenshot as the last resort.
 
-Screenshot fallbacks are center-cropped to 1920×1080 without stretching and
-stored separately under `PegasusMedia/game-wallpapers-screenshot-fallback`.
+Every downloaded background is center-cropped to 1920×1080 without stretching.
+Screenshot fallbacks are stored separately under
+`PegasusMedia/game-wallpapers-screenshot-fallback`.
 Pegasus metadata records `x-background-source`, `x-background-source-url`, and
 `x-background-transform`. The full collection is also indexed after every scan
 in `PegasusMedia/background-provenance.json`; legacy assets whose origin cannot

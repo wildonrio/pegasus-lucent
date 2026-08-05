@@ -2882,7 +2882,9 @@ FocusScope {
             Item {
                 id: lucentSettingsButton
                 anchors.right: searchControl.left
-                anchors.rightMargin: 14
+                // Keep the two icons visually and physically distinct. The old
+                // expanded gear hit target nearly touched the search target.
+                anchors.rightMargin: 30
                 anchors.verticalCenter: parent.verticalCenter
                 width: 38
                 height: 38
@@ -2900,7 +2902,6 @@ FocusScope {
 
                 MouseArea {
                     anchors.fill: parent
-                    anchors.margins: -6
                     onClicked: {
                         root.endSearch()
                         root.settingsOpen = true
@@ -3321,12 +3322,34 @@ FocusScope {
             Behavior on opacity { NumberAnimation { duration: 100 } }
 
             Text {
+                id: allSystemsLibraryLabel
                 x: 58
-                y: 142
+                y: 130
+                visible: root.allSystemsActive
+                text: "ALL SYSTEMS"
+                color: "white"
+                font.family: global.fonts.condensed
+                font.pixelSize: 31
+                font.weight: Font.Bold
+                font.letterSpacing: 2.6
+            }
+
+            Rectangle {
+                x: 282
+                y: 135
+                width: 2
+                height: 27
+                visible: root.allSystemsActive
+                color: root.accent
+            }
+
+            Text {
+                x: root.allSystemsActive ? 304 : 58
+                y: root.allSystemsActive ? 139 : 142
                 text: systemModel.get(root.displaySystemIndex).name
                 color: root.accent
                 font.family: global.fonts.sans
-                font.pixelSize: 22
+                font.pixelSize: root.allSystemsActive ? 20 : 22
                 font.weight: Font.DemiBold
                 font.letterSpacing: 3
             }
@@ -3369,7 +3392,7 @@ FocusScope {
                 text: (root.allSystemsActive || root.activeCollection) ?
                       (activeGameSortModel.count > 0 ? gameRail.currentIndex + 1 : 0) +
                       " / " + activeGameSortModel.count +
-                      (root.allSystemsActive ? "     ALL SYSTEMS  •  SELECT TO PLAY" : "     SELECT TO PLAY") :
+                      "     SELECT TO PLAY" :
                       "ADD GAMES TO  /GAMES/" + systemModel.get(root.activeSystemIndex).folder
                 color: "#aeb6c8"
                 font.family: global.fonts.sans
