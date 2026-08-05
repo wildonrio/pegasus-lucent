@@ -59,6 +59,10 @@ FocusScope {
     property int departedSystemIndex: -1
     property string sortMode: "user"
     property string gameViewMode: "covers"
+    // Navigation state is durable, but QSettings writes must never run inside
+    // a controller input frame. These values are flushed after interaction
+    // settles; launch() still commits synchronously before leaving Pegasus.
+    property bool navigationPersistencePending: false
     property string importState: "idle"
     // A recreated Qt scene polls the companion's last completed status. Treat
     // that first completed response as a silent baseline so returning from a
@@ -106,8 +110,22 @@ FocusScope {
     property var selectedCollection: systemRail.currentIndex === 0 ? null :
             collectionNamed(systemModel.get(systemRail.currentIndex).collectionName)
     property var activeCollection: null
+    // The expensive aggregate library has four persistent native indexes.
+    // Individual systems stay on one small dynamic proxy, avoiding both the
+    // 5,000-row re-sort on input and an excessive matrix of startup models.
+    property var activeGameSortModel: {
+        if (searchQuery !== "")
+            return allSystemsActive ? allGamesSearchSortModel :
+                                      systemGameSearchSortModel
+        if (!allSystemsActive)
+            return systemGameSortModel
+        if (sortMode === "critic") return allCriticSortModel
+        if (sortMode === "user") return allUserSortModel
+        if (sortMode === "release") return allReleaseSortModel
+        return allAlphaSortModel
+    }
     property var activeGame: {
-        if (page === "games" && gameSortModel.count > 0)
+        if (page === "games" && activeGameSortModel.count > 0)
             return gameAtDisplayIndex(gameRail.currentIndex)
         if (page === "home" && homeZone > 0)
             return homeShelfGame(homeZone)
@@ -514,11 +532,18 @@ FocusScope {
     }
 
     function gameAtDisplayIndex(index) {
-        if ((!allSystemsActive && !activeCollection) || gameSortModel.count <= 0 ||
-                index < 0 || index >= gameSortModel.count)
+        if ((!allSystemsActive && !activeCollection) || activeGameSortModel.count <= 0 ||
+                index < 0 || index >= activeGameSortModel.count)
             return null
-        return allSystemsActive ? api.allGames.get(gameSortModel.mapToSource(index)) :
-                activeCollection.games.get(gameSortModel.mapToSource(index))
+        if (allSystemsActive) {
+            var allSourceIndex = activeGameSortModel.mapToSource(index)
+            // Normal aggregate browsing sorts the already-filtered base index;
+            // search proxies still map directly to api.allGames.
+            if (searchQuery === "")
+                allSourceIndex = allLibraryFilterModel.mapToSource(allSourceIndex)
+            return api.allGames.get(allSourceIndex)
+        }
+        return activeCollection.games.get(activeGameSortModel.mapToSource(index))
     }
 
     function cycleSort(direction) {
@@ -526,16 +551,20 @@ FocusScope {
         var current = modes.indexOf(sortMode)
         var step = direction === -1 ? -1 : 1
         sortMode = modes[(current + step + modes.length) % modes.length]
-        api.memory.set("thoriumSortMode", sortMode)
+        scheduleNavigationPersistence()
         gameRail.currentIndex = 0
-        // The proxy can keep the same row index while replacing the game at
-        // that row. Give it one layout turn, then refresh by game identity.
+        // A model pointer swap destroys the previously focused delegate. Keep
+        // the scope itself focused so consecutive shoulder presses are never
+        // swallowed while the new delegate is instantiated.
+        root.forceActiveFocus()
+        // The selected warm proxy changes immediately. Preview/media work is
+        // still coalesced outside this input frame.
         sortChangeCommit.restart()
     }
 
     function toggleGameView() {
         gameViewMode = gameViewMode === "covers" ? "list" : "covers"
-        api.memory.set("thoriumGameView", gameViewMode)
+        scheduleNavigationPersistence()
         Qt.callLater(function() {
             if (gameViewMode === "list")
                 gameListRail.positionViewAtIndex(gameRail.currentIndex, ListView.Center)
@@ -653,7 +682,7 @@ FocusScope {
                 root.gameActionMessage = "MOVED TO LUCENT TRASH"
                 root.gameActionMode = "success"
                 gameRail.currentIndex = Math.max(0, Math.min(gameRail.currentIndex,
-                                                             gameSortModel.count - 1))
+                                                             activeGameSortModel.count - 1))
             } else {
                 root.gameActionMessage = "DELETE FAILED"
                 root.gameActionMode = "error"
@@ -1190,8 +1219,8 @@ FocusScope {
     }
 
     function prepareGameNeighbor(systemIndex, collection, gameIndex, reservedSlot) {
-        if ((!allSystemsActive && !collection) || gameSortModel.count <= 1) return null
-        var wrapped = (gameIndex % gameSortModel.count + gameSortModel.count) % gameSortModel.count
+        if ((!allSystemsActive && !collection) || activeGameSortModel.count <= 1) return null
+        var wrapped = (gameIndex % activeGameSortModel.count + activeGameSortModel.count) % activeGameSortModel.count
         var expectedGame = gameAtDisplayIndex(wrapped)
         var existing = slotFor("game", systemIndex, wrapped)
         if (existing && existing !== activePreviewSlot &&
@@ -1208,7 +1237,7 @@ FocusScope {
         var collection = activeCollection
         var systemIndex = allSystemsActive ? activeGameSystemIndex : activeSystemIndex
         var gameIndex = gameRail.currentIndex
-        if ((!allSystemsActive && !collection) || gameSortModel.count <= 0) {
+        if ((!allSystemsActive && !collection) || activeGameSortModel.count <= 0) {
             homePreviewGame = null
             var emptySlot = activePreviewSlot || previewA
             assignSlot(emptySlot, "game", systemIndex, -1, null)
@@ -1271,6 +1300,7 @@ FocusScope {
 
     function launch(game) {
         if (!game) return
+        navigationPersistence.stop()
         api.memory.set("thoriumSystem", page === "games" ? activeSystemIndex : systemRail.currentIndex)
         api.memory.set("thoriumGame", gameRail.currentIndex)
         api.memory.set("thoriumPage", page)
@@ -1280,6 +1310,22 @@ FocusScope {
         api.memory.set("parallaxReturningFromGame", true)
         stopBottomPreviewForLaunch(game)
         game.launch()
+    }
+
+    function scheduleNavigationPersistence() {
+        navigationPersistencePending = true
+        navigationPersistence.restart()
+    }
+
+    function flushNavigationPersistence() {
+        if (!navigationPersistencePending) return
+        navigationPersistencePending = false
+        api.memory.set("thoriumSystem", page === "games" ?
+                       activeSystemIndex : systemRail.currentIndex)
+        api.memory.set("thoriumGame", page === "games" ? gameRail.currentIndex : 0)
+        api.memory.set("thoriumPage", page)
+        api.memory.set("thoriumSortMode", sortMode)
+        api.memory.set("thoriumGameView", gameViewMode)
     }
 
     function enterCollection() {
@@ -1292,9 +1338,7 @@ FocusScope {
         activeCollection = allSystemsActive ? null : collectionAtSystem(activeSystemIndex)
         page = "games"
         gameRail.currentIndex = 0
-        api.memory.set("thoriumSystem", activeSystemIndex)
-        api.memory.set("thoriumGame", 0)
-        api.memory.set("thoriumPage", "games")
+        scheduleNavigationPersistence()
         Qt.callLater(function() { root.activateGamePreview() })
         root.forceActiveFocus()
     }
@@ -1303,8 +1347,7 @@ FocusScope {
         systemRail.currentIndex = activeSystemIndex
         page = "home"
         homeZone = 0
-        api.memory.set("thoriumSystem", activeSystemIndex)
-        api.memory.set("thoriumPage", "home")
+        scheduleNavigationPersistence()
         chooseSystemWallpaper(systemRail.currentIndex)
         systemRail.positionViewAtIndex(systemRail.currentIndex, ListView.Center)
         Qt.callLater(function() { root.activateHomePreview(false) })
@@ -1322,9 +1365,7 @@ FocusScope {
         activeCollection = allSystemsActive ? null : collectionAtSystem(target)
         systemRail.currentIndex = target
         gameRail.currentIndex = 0
-        api.memory.set("thoriumSystem", target)
-        api.memory.set("thoriumGame", 0)
-        api.memory.set("thoriumPage", "games")
+        scheduleNavigationPersistence()
         // Keep the root, rather than a delegate that is about to be destroyed
         // by the source-model swap, as the key owner. Losing focus during that
         // swap was what made the first opposite-trigger press disappear.
@@ -1529,7 +1570,7 @@ FocusScope {
         Qt.callLater(function() {
             if (root.page === "games") {
                 gameRail.currentIndex = Math.max(0,
-                        Math.min(gameSortModel.count - 1, rememberedGame))
+                        Math.min(activeGameSortModel.count - 1, rememberedGame))
                 if (root.gameViewMode === "list")
                     gameListRail.positionViewAtIndex(gameRail.currentIndex, ListView.Center)
                 else
@@ -1853,6 +1894,13 @@ FocusScope {
         onTriggered: root.updateClock()
     }
 
+    Timer {
+        id: navigationPersistence
+        interval: 220
+        repeat: false
+        onTriggered: root.flushNavigationPersistence()
+    }
+
     // Keep preview selection out of the D-pad event turn. Fast presses update
     // the rail immediately and only the settled selection starts a movie.
     Timer {
@@ -1868,7 +1916,7 @@ FocusScope {
 
     Timer {
         id: sortChangeCommit
-        interval: 36
+        interval: 1
         repeat: false
         onTriggered: {
             if (root.page !== "games")
@@ -1879,6 +1927,7 @@ FocusScope {
             else
                 gameRail.positionViewAtIndex(0, ListView.Beginning)
             root.activateGamePreview()
+            root.forceActiveFocus()
         }
     }
 
@@ -1890,7 +1939,7 @@ FocusScope {
             if (root.page !== "games")
                 return
             gameRail.currentIndex = 0
-            if (gameSortModel.count > 0) {
+            if (activeGameSortModel.count > 0) {
                 if (root.gameViewMode === "list")
                     gameListRail.positionViewAtIndex(0, ListView.Beginning)
                 else
@@ -1906,7 +1955,7 @@ FocusScope {
     // exists. This prevents a one-request flash from the departed system.
     Timer {
         id: systemOpenCommit
-        interval: 28
+        interval: 1
         repeat: false
         onTriggered: {
             if (root.page !== "games")
@@ -2050,30 +2099,116 @@ FocusScope {
         ]
     }
 
+    // Filter the aggregate library only once, then keep four native sort
+    // indexes over that shared base. This avoids four rounds of interpreted
+    // visibility checks during startup while preserving instant sort swaps.
     SortFilterProxyModel {
-        id: gameSortModel
-        sourceModel: root.allSystemsActive ? api.allGames :
-                     (root.activeCollection ? root.activeCollection.games : null)
+        id: allLibraryFilterModel
+        sourceModel: api.allGames
+        filters: [
+            ExpressionFilter {
+                expression: root.isLucentLibraryGame(api.allGames.get(index)) &&
+                            root.gameVisibleAfterMutation(api.allGames.get(index))
+            }
+        ]
+    }
+
+    SortFilterProxyModel {
+        id: allCriticSortModel
+        sourceModel: allLibraryFilterModel
+        sorters: RoleSorter {
+            roleName: "rating"
+            sortOrder: Qt.DescendingOrder
+        }
+    }
+
+    SortFilterProxyModel {
+        id: allUserSortModel
+        sourceModel: allLibraryFilterModel
+        sorters: RoleSorter {
+            roleName: "sortBy"
+            sortOrder: Qt.AscendingOrder
+        }
+    }
+
+    SortFilterProxyModel {
+        id: allAlphaSortModel
+        sourceModel: allLibraryFilterModel
+        sorters: RoleSorter {
+            roleName: "title"
+            sortOrder: Qt.AscendingOrder
+        }
+    }
+
+    SortFilterProxyModel {
+        id: allReleaseSortModel
+        sourceModel: allLibraryFilterModel
+        sorters: RoleSorter {
+            roleName: "release"
+            sortOrder: Qt.DescendingOrder
+        }
+    }
+
+    SortFilterProxyModel {
+        id: systemGameSortModel
+        sourceModel: root.activeCollection ? root.activeCollection.games : null
+        filters: [
+            ExpressionFilter {
+                expression: root.gameVisibleAfterMutation(
+                    root.activeCollection ? root.activeCollection.games.get(index) : null)
+            }
+        ]
+        sorters: RoleSorter {
+            roleName: root.sortMode === "critic" ? "rating" :
+                      root.sortMode === "user" ? "sortBy" :
+                      root.sortMode === "release" ? "release" : "title"
+            sortOrder: root.sortMode === "critic" || root.sortMode === "release" ?
+                       Qt.DescendingOrder : Qt.AscendingOrder
+        }
+    }
+
+    // Search is the only genuinely dynamic filter. Keep these proxies detached
+    // during normal browsing so typing does not invalidate all warm caches.
+    SortFilterProxyModel {
+        id: allGamesSearchSortModel
+        sourceModel: root.searchQuery !== "" ? api.allGames : null
         filters: [
             RegExpFilter {
                 roleName: "title"
-                pattern: root.searchQuery === "" ? ".*" :
-                         root.escapedSearchPattern(root.searchQuery)
+                pattern: root.escapedSearchPattern(root.searchQuery)
                 caseSensitivity: Qt.CaseInsensitive
             },
             ExpressionFilter {
-                enabled: root.allSystemsActive
                 expression: root.isLucentLibraryGame(api.allGames.get(index))
             },
             ExpressionFilter {
-                expression: root.gameVisibleAfterMutation(
-                    root.allSystemsActive ? api.allGames.get(index) :
-                    (root.activeCollection ? root.activeCollection.games.get(index) : null))
+                expression: root.gameVisibleAfterMutation(api.allGames.get(index))
             }
         ]
-        // All four paths stay inside the native proxy model. Critic uses the
-        // metadata rating role; user uses a persistent score key in sortBy.
-        // This removes thousands of interpreted JS comparisons on entry.
+        sorters: RoleSorter {
+            roleName: root.sortMode === "critic" ? "rating" :
+                      root.sortMode === "user" ? "sortBy" :
+                      root.sortMode === "release" ? "release" : "title"
+            sortOrder: root.sortMode === "critic" || root.sortMode === "release" ?
+                       Qt.DescendingOrder : Qt.AscendingOrder
+        }
+    }
+
+    SortFilterProxyModel {
+        id: systemGameSearchSortModel
+        sourceModel: root.searchQuery !== "" && root.activeCollection ?
+                     root.activeCollection.games : null
+        filters: [
+            RegExpFilter {
+                roleName: "title"
+                pattern: root.escapedSearchPattern(root.searchQuery)
+                caseSensitivity: Qt.CaseInsensitive
+            },
+            ExpressionFilter {
+                expression: root.gameVisibleAfterMutation(
+                    root.activeCollection ? root.activeCollection.games.get(index) : null)
+            }
+        ]
         sorters: RoleSorter {
             roleName: root.sortMode === "critic" ? "rating" :
                       root.sortMode === "user" ? "sortBy" :
@@ -3232,8 +3367,8 @@ FocusScope {
                 x: 62
                 y: 286
                 text: (root.allSystemsActive || root.activeCollection) ?
-                      (gameSortModel.count > 0 ? gameRail.currentIndex + 1 : 0) +
-                      " / " + gameSortModel.count +
+                      (activeGameSortModel.count > 0 ? gameRail.currentIndex + 1 : 0) +
+                      " / " + activeGameSortModel.count +
                       (root.allSystemsActive ? "     ALL SYSTEMS  •  SELECT TO PLAY" : "     SELECT TO PLAY") :
                       "ADD GAMES TO  /GAMES/" + systemModel.get(root.activeSystemIndex).folder
                 color: "#aeb6c8"
@@ -3328,7 +3463,7 @@ FocusScope {
                             anchors.fill: parent
                             onClicked: {
                                 root.sortMode = modelData
-                                api.memory.set("thoriumSortMode", root.sortMode)
+                                root.scheduleNavigationPersistence()
                                 gameRail.currentIndex = 0
                                 sortChangeCommit.restart()
                             }
@@ -3344,7 +3479,7 @@ FocusScope {
                 width: parent.width - 48
                 height: 560
                 orientation: ListView.Horizontal
-                model: gameSortModel
+                model: activeGameSortModel
                 spacing: 22
                 clip: false
                 focus: root.page === "games"
@@ -3517,7 +3652,7 @@ FocusScope {
                     width: parent.width - x
                     height: parent.height
                     orientation: ListView.Vertical
-                    model: gameSortModel
+                    model: activeGameSortModel
                     currentIndex: gameRail.currentIndex
                     spacing: 4
                     clip: true
@@ -4168,4 +4303,5 @@ FocusScope {
             }
         }
     }
+
 }
