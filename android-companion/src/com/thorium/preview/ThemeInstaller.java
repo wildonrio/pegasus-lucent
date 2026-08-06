@@ -32,8 +32,12 @@ final class ThemeInstaller {
             "pegasus-frontend");
     private static final File PEGASUS_CONFIG = new File(Environment.getExternalStorageDirectory(),
             "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
+    private static final File LUCENT_CONFIG = new File(Environment.getExternalStorageDirectory(),
+            "Android/data/com.thorium.preview/files/pegasus-frontend");
     private static final File THEME = new File(PEGASUS, "themes/lucent");
     private static final File VERSION = new File(THEME, ".lucent-version");
+    private static final File CONFIG_MIGRATION = new File(LUCENT_CONFIG,
+            ".lucent-config-migrated");
 
     private ThemeInstaller() {}
 
@@ -55,21 +59,21 @@ final class ThemeInstaller {
         installBundled(context, true, completion);
     }
 
+    /** Installs Lucent before the embedded Pegasus activity draws its first frame. */
+    static void installBundledNow(Context context) {
+        try {
+            installBundledBlocking(context, false);
+        } catch (java.io.FileNotFoundException missingOptionalAsset) {
+            // Development builds may intentionally omit the large theme bundle.
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to install bundled theme before startup", error);
+        }
+    }
+
     private static void installBundled(Context context, boolean force, Runnable completion) {
         Thread worker = new Thread(() -> {
             try {
-                if (!hasStorageAccess(context)) return;
-                String bundled = readAssetText(context, ASSET_VERSION).trim();
-                if (!bundled.isEmpty() && (force || !bundled.equals(readText(VERSION).trim()))) {
-                    try (InputStream input = context.getAssets().open(ASSET_ZIP)) {
-                        installZip(input, bundled);
-                    }
-                }
-                // Enforce Lucent's ROM-only provider configuration on every
-                // companion launch, even when the theme version itself is
-                // already current. Pegasus settings can otherwise be changed
-                // independently and Android applications reappear as games.
-                selectTheme();
+                installBundledBlocking(context, force);
             } catch (java.io.FileNotFoundException missingOptionalAsset) {
                 // Development builds may intentionally omit the large theme bundle.
             } catch (Exception error) {
@@ -80,6 +84,31 @@ final class ThemeInstaller {
         }, "lucent-theme-install");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private static void installBundledBlocking(Context context, boolean force) throws Exception {
+        if (!hasStorageAccess(context)) return;
+        migratePegasusConfig();
+        String bundled = readAssetText(context, ASSET_VERSION).trim();
+        if (!bundled.isEmpty() && (force || !bundled.equals(readText(VERSION).trim()))) {
+            try (InputStream input = context.getAssets().open(ASSET_ZIP)) {
+                installZip(input, bundled);
+            }
+        }
+        // Enforce the ROM-only provider configuration on every launch, even
+        // when the theme is current, so Android applications never reappear.
+        selectTheme();
+    }
+
+    /**
+     * Carries the existing Pegasus library, play history and theme memory into
+     * the unified package once. ROMs and media are referenced in place and are
+     * never copied, moved or deleted by this migration.
+     */
+    private static synchronized void migratePegasusConfig() throws Exception {
+        if (CONFIG_MIGRATION.isFile() || !PEGASUS_CONFIG.isDirectory()) return;
+        copyConfigTree(PEGASUS_CONFIG, LUCENT_CONFIG);
+        writeText(CONFIG_MIGRATION, "migrated from org.pegasus_frontend.android\n");
     }
 
     static synchronized void installZip(File zip, String version) throws Exception {
@@ -151,6 +180,7 @@ final class ThemeInstaller {
         // the legacy shared path, and disable the Android Apps provider: Lucent
         // is deliberately a ROM library, never an application launcher.
         updateSettings(new File(PEGASUS_CONFIG, "settings.txt"));
+        updateSettings(new File(LUCENT_CONFIG, "settings.txt"));
         updateSettings(new File(PEGASUS, "settings.txt"));
     }
 
@@ -234,6 +264,21 @@ final class ThemeInstaller {
             int count;
             while ((count = in.read(buffer)) >= 0) out.write(buffer, 0, count);
         }
+    }
+
+    private static void copyConfigTree(File source, File target) throws Exception {
+        if (source.isDirectory()) {
+            target.mkdirs();
+            File[] children = source.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    if ("lastrun.log".equals(child.getName())) continue;
+                    copyConfigTree(child, new File(target, child.getName()));
+                }
+            }
+            return;
+        }
+        copyTree(source, target);
     }
 
     private static void deleteTree(File file) {

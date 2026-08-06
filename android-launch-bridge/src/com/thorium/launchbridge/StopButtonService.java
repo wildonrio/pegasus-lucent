@@ -2,7 +2,6 @@ package com.thorium.launchbridge;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
-import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -119,10 +118,13 @@ public final class StopButtonService extends AccessibilityService {
                 lastStopAt = now;
                 stopHeld = false;
                 ++stopGeneration;
-                if (DOLPHIN_PACKAGE.equals(contentPackage))
-                    exitDolphinAndReturn();
-                else
-                    returnToPegasus(contentPackage);
+                // Background the live emulation task instead of terminating
+                // it. Android delivers onPause/onStop so emulators can flush
+                // battery saves and their own per-game autosave slot, while
+                // the process remains immediately resumable until the OS
+                // needs its memory. This is intentionally identical for
+                // Dolphin and every standalone emulator.
+                returnToPegasus(contentPackage);
             }
         }, HOLD_TO_EXIT_MS);
         // Never consume the original key. A tap continues to be Select in
@@ -227,22 +229,10 @@ public final class StopButtonService extends AccessibilityService {
         options.setLaunchDisplayId(0);
         startActivity(pegasus, options.toBundle());
 
-        // Once Pegasus owns the upper display, the emulator is a background
-        // process and Android permits us to terminate it without ever exposing
-        // its library or the Android launcher.
-        if (contentPackage != null) {
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (isClosableContentPackage(contentPackage)) {
-                        ActivityManager manager =
-                                (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-                        if (manager != null)
-                            manager.killBackgroundProcesses(contentPackage);
-                    }
-                }
-            }, 450L);
-        }
+        // Do not call killBackgroundProcesses here. Besides discarding an
+        // emulator's in-memory session, that could race its asynchronous SRAM
+        // or autosave write. Android's normal task/LRU policy is the correct
+        // memory manager for suspended games.
     }
 
     private boolean isClosableContentPackage(String packageName) {

@@ -9,10 +9,12 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.25"
+    readonly property string lucentVersion: "3.0.33"
 
     property string page: "home"
-    property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 recently added, 4 top games
+    // 0 systems; 1 continue; 2 most played; 3 recently added;
+    // 4 critic; 5 user; 6 A-Z; 7 release.
+    property int homeZone: 0
     property bool previewReady: false
     property double previewRequestSequence: Date.now()
     property double currentBottomPreviewSequence: 0
@@ -34,6 +36,7 @@ FocusScope {
     property bool settingsOpen: false
     property int settingsIndex: 0
     property bool liquidGlassEnabled: false
+    property bool systemLedEnabled: true
     property bool searchOpen: false
     property string searchQuery: ""
     property bool searchKeyboardAccepting: false
@@ -59,6 +62,24 @@ FocusScope {
     property int departedSystemIndex: -1
     property string sortMode: "user"
     property string gameViewMode: "covers"
+    property string homeViewMode: "covers"
+    property int homeListCategory: 1
+    property int homeListFocusColumn: 1 // 0 systems, 1 category/game list
+    property var homeListEntries: []
+    property var homeListCache: ({})
+    property var availableBrandSlugs: []
+    property var collectionFolderMap: ({})
+    property var systemGameCache: ({})
+    property var libraryGameMap: ({})
+    property var activeSystemGames: []
+    property bool libraryIndexReady: false
+    property var pendingLibraryIndex: null
+    property var pendingLibraryGameMap: ({})
+    property int libraryIndexBuildPosition: 0
+    property bool updatePromptOpen: false
+    property int updatePromptChoice: 0
+    property bool updatePromptDismissed: false
+    property string updateStatusMessage: ""
     // Navigation state is durable, but QSettings writes must never run inside
     // a controller input frame. These values are flushed after interaction
     // settles; launch() still commits synchronously before leaving Pegasus.
@@ -121,20 +142,29 @@ FocusScope {
             return allSystemsActive ? allGamesSearchSortModel :
                                       systemGameSearchSortModel
         if (!allSystemsActive)
-            return systemGameSortModel
+            return libraryIndexReady ? null : systemGameSortModel
         if (sortMode === "critic") return allCriticSortModel
         if (sortMode === "user") return allUserSortModel
         if (sortMode === "release") return allReleaseSortModel
         return allAlphaSortModel
     }
+    property var activeGameModel: searchQuery === "" && !allSystemsActive && libraryIndexReady ?
+            activeSystemGames : activeGameSortModel
+    property int activeGameCount: searchQuery === "" && !allSystemsActive && libraryIndexReady ?
+            activeSystemGames.length : (activeGameSortModel ? activeGameSortModel.count : 0)
     property var activeGame: {
-        if (page === "games" && activeGameSortModel.count > 0)
+        if (page === "games" && activeGameCount > 0)
             return gameAtDisplayIndex(gameRail.currentIndex)
+        if (page === "home" && homeViewMode === "list")
+            return homeListGameAt(homeListRail.currentIndex)
         if (page === "home" && homeZone > 0)
             return homeShelfGame(homeZone)
         return homePreviewGame
     }
     property color accent: systemModel.get(displaySystemIndex).accent
+    onAccentChanged: {
+        if (systemLedEnabled) systemLedCommit.restart()
+    }
     property string clockText: ""
 
     /*
@@ -316,6 +346,106 @@ FocusScope {
                 "accent": definition.accent
             })
         }
+        refreshAvailableBrands()
+        Qt.callLater(function() { root.loadLibraryIndex() })
+    }
+
+    function refreshAvailableBrands() {
+        var seen = ({})
+        var brands = []
+        var folders = ({})
+        for (var index = 1; index < systemModel.count; ++index) {
+            folders[String(systemModel.get(index).collectionName)] =
+                    String(systemModel.get(index).folder)
+            var brand = brandSlugForSystem(index)
+            if (brand === "" || seen[brand]) continue
+            seen[brand] = true
+            brands.push(brand)
+        }
+        collectionFolderMap = folders
+        availableBrandSlugs = brands
+    }
+
+    function libraryCacheKey(folder, title) {
+        return String(folder || "") + "|" +
+                String(title || "").toLowerCase().trim().replace(/\s+/g, " ")
+    }
+
+    function loadLibraryIndex() {
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE) return
+            if (request.status !== 200) {
+                libraryIndexRetry.restart()
+                return
+            }
+            try {
+                var payload = JSON.parse(request.responseText)
+                // Keep the native service's compact key arrays intact. Turning
+                // every key into a QML game object in one callback created a
+                // multi-second UI-thread stall. Only the 5K game lookup is
+                // built here, in small event-loop slices; individual rails
+                // resolve the handful of keys they actually render.
+                root.libraryIndexReady = false
+                root.pendingLibraryIndex = payload.systems || ({})
+                root.pendingLibraryGameMap = ({})
+                root.libraryIndexBuildPosition = 0
+                libraryIndexBuildTimer.restart()
+            } catch (error) {
+                libraryIndexRetry.restart()
+            }
+        }
+        request.open("GET", "http://127.0.0.1:43821/library/index", true)
+        request.send()
+    }
+
+    function continueLibraryIndexBuild() {
+        if (!pendingLibraryIndex) return
+        var gameMap = pendingLibraryGameMap
+        var end = Math.min(api.allGames.count, libraryIndexBuildPosition + 180)
+        for (var gameIndex = libraryIndexBuildPosition; gameIndex < end; ++gameIndex) {
+            var game = api.allGames.get(gameIndex)
+            if (!isLucentLibraryGame(game) || !gameVisibleAfterMutation(game)) continue
+            for (var collectionIndex = 0;
+                 collectionIndex < game.collections.count; ++collectionIndex) {
+                var collectionName = String(game.collections.get(collectionIndex).name || "")
+                var folder = collectionFolderMap[collectionName]
+                if (!folder) continue
+                gameMap[libraryCacheKey(folder, game.title)] = game
+                break
+            }
+        }
+        libraryIndexBuildPosition = end
+        if (end < api.allGames.count) {
+            libraryIndexBuildTimer.restart()
+            return
+        }
+
+        libraryGameMap = gameMap
+        systemGameCache = pendingLibraryIndex
+        pendingLibraryIndex = null
+        pendingLibraryGameMap = ({})
+        libraryIndexReady = true
+        homeListCache = ({})
+        activateCachedSystemSort()
+        if (page === "home" && homeViewMode === "list")
+            rebuildHomeList()
+        else if (page === "games") {
+            gameRail.currentIndex = Math.max(0,
+                    Math.min(gameRail.currentIndex, activeGameCount - 1))
+            Qt.callLater(function() { root.activateGamePreview() })
+        }
+    }
+
+    function activateCachedSystemSort() {
+        if (allSystemsActive || activeSystemIndex <= 0) {
+            activeSystemGames = []
+            return
+        }
+        var folder = String(systemModel.get(activeSystemIndex).folder)
+        var systemCache = systemGameCache[folder]
+        activeSystemGames = systemCache && systemCache[sortMode] ?
+                systemCache[sortMode] : []
     }
 
     function recentGame(index) {
@@ -334,8 +464,15 @@ FocusScope {
         return proxyGame(mostPlayedModel, index)
     }
 
-    function topGame(index) {
-        return proxyGame(topGamesModel, index)
+    function aggregateSortedSourceIndex(proxy, index) {
+        if (!proxy || index < 0 || index >= proxy.count) return -1
+        var filteredIndex = proxy.mapToSource(index)
+        return filteredIndex < 0 ? -1 : allLibraryFilterModel.mapToSource(filteredIndex)
+    }
+
+    function aggregateSortedGame(proxy, index) {
+        var sourceIndex = aggregateSortedSourceIndex(proxy, index)
+        return sourceIndex < 0 ? null : api.allGames.get(sourceIndex)
     }
 
     function recentlyAddedGame(index) {
@@ -361,19 +498,162 @@ FocusScope {
             recentlyAddedModel.append(candidates[candidate])
     }
 
+    function homeShelfModel(zone) {
+        if (zone === 1) return recentModel
+        if (zone === 2) return mostPlayedModel
+        if (zone === 3) return recentlyAddedModel
+        if (zone === 4) return allCriticSortModel
+        if (zone === 5) return allUserSortModel
+        if (zone === 6) return allAlphaSortModel
+        return allReleaseSortModel
+    }
+
+    function homeShelfRail(zone) {
+        if (zone === 1) return recentRail
+        if (zone === 2) return mostPlayedRail
+        if (zone === 3) return recentlyAddedRail
+        if (zone === 4) return criticRail
+        if (zone === 5) return userRail
+        if (zone === 6) return alphaRail
+        return releaseRail
+    }
+
+    function homeShelfGameAt(zone, index) {
+        if (zone === 1) return recentGame(index)
+        if (zone === 2) return mostPlayedGame(index)
+        if (zone === 3) return recentlyAddedGame(index)
+        return aggregateSortedGame(homeShelfModel(zone), index)
+    }
+
     function homeShelfGame(zone) {
-        if (zone === 1) return recentGame(recentRail.currentIndex)
-        if (zone === 2) return mostPlayedGame(mostPlayedRail.currentIndex)
-        if (zone === 3) return recentlyAddedGame(recentlyAddedRail.currentIndex)
-        if (zone === 4) return topGame(topGamesRail.currentIndex)
-        return null
+        var rail = homeShelfRail(zone)
+        return rail ? homeShelfGameAt(zone, rail.currentIndex) : null
     }
 
     function homeShelfName(zone) {
         if (zone === 1) return "CONTINUE PLAYING"
         if (zone === 2) return "MOST PLAYED"
         if (zone === 3) return "RECENTLY ADDED"
-        return "TOP GAMES"
+        if (zone === 4) return "CRITIC SCORE"
+        if (zone === 5) return "USER SCORE"
+        if (zone === 6) return "A–Z"
+        return "RELEASE DATE"
+    }
+
+    function homeCategorySourceIndex(zone, index) {
+        if (zone === 1)
+            return index >= 0 && index < recentModel.count ? recentModel.mapToSource(index) : -1
+        if (zone === 2)
+            return index >= 0 && index < mostPlayedModel.count ? mostPlayedModel.mapToSource(index) : -1
+        if (zone === 3)
+            return index >= 0 && index < recentlyAddedModel.count ?
+                    Number(recentlyAddedModel.get(index).sourceIndex) : -1
+        return aggregateSortedSourceIndex(homeShelfModel(zone), index)
+    }
+
+    function homeCategoryCount(zone) {
+        if (zone === 1) return recentModel.count
+        if (zone === 2) return mostPlayedModel.count
+        if (zone === 3) return recentlyAddedModel.count
+        return homeShelfModel(zone).count
+    }
+
+    function homeListGameAt(index) {
+        if (index < 0 || index >= homeListEntries.length)
+            return null
+        return homeListEntries[index]
+    }
+
+    function rebuildHomeList() {
+        if (homeViewMode !== "list") return
+        var systemIndex = Math.max(0, systemRail.currentIndex)
+        var cacheKey = libraryMutationRevision + ":" + homeListCategory + ":" + systemIndex
+        var cached = homeListCache[cacheKey]
+        if (!cached) {
+            cached = []
+            if (systemIndex > 0 && homeListCategory >= 4) {
+                var sortNames = ["", "", "", "", "critic", "user", "alpha", "release"]
+                var folder = String(systemModel.get(systemIndex).folder)
+                var systemCache = systemGameCache[folder]
+                var orderedKeys = systemCache ? systemCache[sortNames[homeListCategory]] : null
+                if (orderedKeys) {
+                    for (var keyIndex = 0;
+                         keyIndex < orderedKeys.length && cached.length < 240; ++keyIndex) {
+                        var indexedGame = libraryGameMap[String(orderedKeys[keyIndex])]
+                        if (indexedGame) cached.push(indexedGame)
+                    }
+                }
+            } else {
+                var sourceCount = homeCategoryCount(homeListCategory)
+                // Aggregate sorted views stop after 240 rows. Continue/Most/
+                // Recent are compact native models, so filtering those by one
+                // system never traverses the full library.
+                for (var index = 0; index < sourceCount && cached.length < 240; ++index) {
+                    var game = homeShelfGameAt(homeListCategory, index)
+                    if (game && (systemIndex === 0 || systemIndexForGame(game) === systemIndex))
+                        cached.push(game)
+                }
+            }
+            homeListCache[cacheKey] = cached
+        }
+        homeListEntries = cached.slice(0)
+        homeZone = homeListCategory
+        // While the user is moving through systems, no game row is selected.
+        // A random item from the active category drives only the wallpaper and
+        // preview. Pressing A locks the system and deliberately selects row 0.
+        homeListRail.currentIndex = homeListEntries.length > 0 ?
+                (homeListFocusColumn === 0 ?
+                 Math.floor(Math.random() * homeListEntries.length) : 0) : -1
+        Qt.callLater(function() {
+            if (root.homeViewMode !== "list" || root.page !== "home") return
+            if (homeListRail.currentIndex >= 0)
+                homeListRail.positionViewAtIndex(homeListRail.currentIndex, ListView.Center)
+            root.activateHomeListPreview()
+            root.forceActiveFocus()
+        })
+    }
+
+    function cycleHomeListCategory(direction) {
+        var next = homeListCategory + (direction < 0 ? -1 : 1)
+        if (next < 1) {
+            homeListFocusColumn = 0
+            rebuildHomeList()
+            root.forceActiveFocus()
+            return
+        }
+        if (next > 7) return
+        homeListFocusColumn = 1
+        homeListCategory = next
+        rebuildHomeList()
+    }
+
+    function enterHomeListGames() {
+        homeListFocusColumn = 1
+        if (homeListEntries.length > 0)
+            homeListRail.currentIndex = 0
+        activateHomeListPreview()
+        root.forceActiveFocus()
+    }
+
+    function toggleHomeView() {
+        homeViewMode = homeViewMode === "covers" ? "list" : "covers"
+        api.memory.set("thoriumHomeView", homeViewMode)
+        if (homeViewMode === "list") {
+            homeListCategory = homeZone > 0 ? homeZone : 1
+            homeListFocusColumn = 0
+            rebuildHomeList()
+        } else {
+            homeZone = 0
+            chooseSystemWallpaper(systemRail.currentIndex)
+            Qt.callLater(function() { root.activateHomePreview(false) })
+            systemRail.forceActiveFocus()
+        }
+    }
+
+    function systemGameCount(index) {
+        if (index === 0) return romGameCount()
+        var collection = collectionAtSystem(index)
+        return collection ? collection.games.count : 0
     }
 
     function systemIndexForGame(game) {
@@ -560,9 +840,11 @@ FocusScope {
     }
 
     function gameAtDisplayIndex(index) {
-        if ((!allSystemsActive && !activeCollection) || activeGameSortModel.count <= 0 ||
-                index < 0 || index >= activeGameSortModel.count)
+        if ((!allSystemsActive && !activeCollection) || activeGameCount <= 0 ||
+                index < 0 || index >= activeGameCount)
             return null
+        if (!allSystemsActive && searchQuery === "" && libraryIndexReady)
+            return libraryGameMap[String(activeSystemGames[index])] || null
         if (allSystemsActive) {
             var allSourceIndex = activeGameSortModel.mapToSource(index)
             // Normal aggregate browsing sorts the already-filtered base index;
@@ -579,7 +861,13 @@ FocusScope {
         var current = modes.indexOf(sortMode)
         var step = direction === -1 ? -1 : 1
         sortMode = modes[(current + step + modes.length) % modes.length]
+        activateCachedSystemSort()
         scheduleNavigationPersistence()
+        if (page === "home" && homeViewMode === "list") {
+            rebuildHomeList()
+            root.forceActiveFocus()
+            return
+        }
         gameRail.currentIndex = 0
         // A model pointer swap destroys the previously focused delegate. Keep
         // the scope itself focused so consecutive shoulder presses are never
@@ -680,6 +968,8 @@ FocusScope {
             if (request.status === 200) {
                 root.renamedGameTitles[identity] = title
                 root.libraryMutationRevision += 1
+                root.libraryIndexReady = false
+                root.loadLibraryIndex()
                 root.gameActionMessage = "RENAMED"
                 root.gameActionMode = "success"
             } else {
@@ -707,10 +997,12 @@ FocusScope {
             if (request.status === 200) {
                 root.hiddenGameIds[identity] = true
                 root.libraryMutationRevision += 1
+                root.libraryIndexReady = false
+                root.loadLibraryIndex()
                 root.gameActionMessage = "MOVED TO LUCENT TRASH"
                 root.gameActionMode = "success"
                 gameRail.currentIndex = Math.max(0, Math.min(gameRail.currentIndex,
-                                                             activeGameSortModel.count - 1))
+                                                             activeGameCount - 1))
             } else {
                 root.gameActionMessage = "DELETE FAILED"
                 root.gameActionMode = "error"
@@ -749,7 +1041,7 @@ FocusScope {
                 "&title=" + encodeURIComponent(title) +
                 "&system=" + encodeURIComponent(systemName) +
                 "&score=" + encodeURIComponent(score) +
-                "&advance=" + (page === "home" && homeZone === 0 ? "1" : "0") +
+                "&advance=" + (randomHomePreviewActive() ? "1" : "0") +
                 "&preload_prev=" + encodeURIComponent(videoSource(previousGame)) +
                 "&preload_next=" + encodeURIComponent(videoSource(nextGame)) +
                 "&preload_aux=" + encodeURIComponent(videoSource(auxiliaryGame))
@@ -776,6 +1068,29 @@ FocusScope {
         var request = new XMLHttpRequest()
         request.open("GET", url, true)
         request.send()
+    }
+
+    function randomHomePreviewActive() {
+        return page === "home" &&
+                ((homeViewMode === "covers" && homeZone === 0) ||
+                 (homeViewMode === "list" && homeListFocusColumn === 0))
+    }
+
+    function advanceRandomHomePreview() {
+        if (page !== "home") return
+        if (homeViewMode === "list" && homeListFocusColumn === 0) {
+            if (homeListEntries.length <= 1) {
+                activateHomeListPreview()
+                return
+            }
+            var previous = homeListRail.currentIndex
+            var next = Math.floor(Math.random() * (homeListEntries.length - 1))
+            if (next >= previous) ++next
+            homeListRail.currentIndex = next
+            activateHomeListPreview()
+        } else if (homeViewMode === "covers" && homeZone === 0) {
+            activateHomePreview(true)
+        }
     }
 
     function useBottomPreview() {
@@ -810,8 +1125,8 @@ FocusScope {
                 var completedSequence = Number(payload.completedSeq || 0)
                 if (completedSequence > 0 &&
                         completedSequence === root.currentBottomPreviewSequence &&
-                        root.page === "home" && root.homeZone === 0)
-                    Qt.callLater(function() { root.activateHomePreview(true) })
+                        root.randomHomePreviewActive())
+                    Qt.callLater(function() { root.advanceRandomHomePreview() })
             } catch (error) {
                 // A missing optional companion must never affect navigation.
             }
@@ -832,7 +1147,9 @@ FocusScope {
             requestPreviewEndpoint("blank")
         else
             singleCurrentSlot = -1
-        if (page === "home" && homeZone === 0)
+        if (page === "home" && homeViewMode === "list")
+            activateHomeListPreview()
+        else if (page === "home" && homeZone === 0)
             activateHomePreview(false)
         else if (page === "games")
             activateGamePreview()
@@ -864,6 +1181,61 @@ FocusScope {
         return dualScreenDevice ? "AUTOMATIC (LOWER)" : "AUTOMATIC (PIP)"
     }
 
+    function pollUpdateStatus() {
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE || request.status !== 200)
+                return
+            try {
+                var payload = JSON.parse(request.responseText)
+                root.updateStatusMessage = String(payload.message || "")
+                if (Boolean(payload.installReady) && !root.updatePromptDismissed) {
+                    root.updatePromptChoice = 0
+                    root.updatePromptOpen = true
+                    root.forceActiveFocus()
+                }
+            } catch (error) {
+                // The updater is optional while an older package is migrating.
+            }
+        }
+        request.open("GET", "http://127.0.0.1:43821/update/status", true)
+        request.send()
+    }
+
+    function installReadyUpdate() {
+        updatePromptOpen = false
+        requestPreviewEndpoint("update/install")
+    }
+
+    function dismissReadyUpdate() {
+        updatePromptDismissed = true
+        updatePromptOpen = false
+        root.forceActiveFocus()
+    }
+
+    function colorByteHex(value) {
+        var text = Math.max(0, Math.min(255, Math.round(value * 255))).toString(16)
+        return text.length < 2 ? "0" + text : text
+    }
+
+    function selectedLedColor() {
+        return colorByteHex(accent.r) + colorByteHex(accent.g) + colorByteHex(accent.b)
+    }
+
+    function applySystemLedColor() {
+        if (!systemLedEnabled) return
+        requestPreviewEndpoint("led?enabled=1&brightness=180&color=" + selectedLedColor())
+    }
+
+    function setSystemLedEnabled(enabled) {
+        systemLedEnabled = Boolean(enabled)
+        api.memory.set("lucentSystemLedEnabled", systemLedEnabled)
+        if (systemLedEnabled)
+            systemLedCommit.restart()
+        else
+            requestPreviewEndpoint("led?enabled=0")
+    }
+
     function activateSetting(direction) {
         if (settingsIndex === 0) {
             // Static, predecoded system artwork is the sole supported mode.
@@ -876,7 +1248,10 @@ FocusScope {
         } else if (settingsIndex === 3) {
             liquidGlassEnabled = !liquidGlassEnabled
             api.memory.set("thoriumLiquidGlassEnabled", liquidGlassEnabled)
+        } else if (settingsIndex === 4) {
+            setSystemLedEnabled(!systemLedEnabled)
         } else {
+            updatePromptDismissed = false
             importState = "idle"
             importStatusInitialized = true
             importToastVisible = true
@@ -895,7 +1270,9 @@ FocusScope {
                 var detectedDualScreen = Boolean(capabilities.dualScreen)
                 if (root.dualScreenDevice !== detectedDualScreen) {
                     root.dualScreenDevice = detectedDualScreen
-                    if (root.page === "home" && root.homeZone === 0)
+                    if (root.page === "home" && root.homeViewMode === "list")
+                        root.activateHomeListPreview()
+                    else if (root.page === "home" && root.homeZone === 0)
                         root.activateHomePreview(false)
                     else if (root.page === "games")
                         root.activateGamePreview()
@@ -1258,8 +1635,8 @@ FocusScope {
     }
 
     function prepareGameNeighbor(systemIndex, collection, gameIndex, reservedSlot) {
-        if ((!allSystemsActive && !collection) || activeGameSortModel.count <= 1) return null
-        var wrapped = (gameIndex % activeGameSortModel.count + activeGameSortModel.count) % activeGameSortModel.count
+        if ((!allSystemsActive && !collection) || activeGameCount <= 1) return null
+        var wrapped = (gameIndex % activeGameCount + activeGameCount) % activeGameCount
         var expectedGame = gameAtDisplayIndex(wrapped)
         var existing = slotFor("game", systemIndex, wrapped)
         if (existing && existing !== activePreviewSlot &&
@@ -1276,7 +1653,7 @@ FocusScope {
         var collection = activeCollection
         var systemIndex = allSystemsActive ? activeGameSystemIndex : activeSystemIndex
         var gameIndex = gameRail.currentIndex
-        if ((!allSystemsActive && !collection) || activeGameSortModel.count <= 0) {
+        if ((!allSystemsActive && !collection) || activeGameCount <= 0) {
             homePreviewGame = null
             var emptySlot = activePreviewSlot || previewA
             assignSlot(emptySlot, "game", systemIndex, -1, null)
@@ -1318,23 +1695,38 @@ FocusScope {
 
     function activateShelfPreview(zone) {
         if (!previewReady) return
-        var model = zone === 1 ? recentModel :
-                    zone === 2 ? mostPlayedModel :
-                    zone === 3 ? recentlyAddedModel : topGamesModel
-        var rail = zone === 1 ? recentRail :
-                   zone === 2 ? mostPlayedRail :
-                   zone === 3 ? recentlyAddedRail : topGamesRail
+        var model = homeShelfModel(zone)
+        var rail = homeShelfRail(zone)
         if (!model || model.count <= 0) return
-        var game = zone === 3 ? recentlyAddedGame(rail.currentIndex) :
-                   proxyGame(model, rail.currentIndex)
+        var game = homeShelfGameAt(zone, rail.currentIndex)
         var slot = freeSlot(null, null)
         assignSlot(slot, "shelf" + zone, -1, rail.currentIndex, game)
         activePreviewSlot = slot
-        var previous = zone === 3 ?
-                recentlyAddedGame((rail.currentIndex - 1 + model.count) % model.count) :
-                proxyGame(model, (rail.currentIndex - 1 + model.count) % model.count)
-        var next = zone === 3 ? recentlyAddedGame((rail.currentIndex + 1) % model.count) :
-                   proxyGame(model, (rail.currentIndex + 1) % model.count)
+        var previous = homeShelfGameAt(zone,
+                (rail.currentIndex - 1 + model.count) % model.count)
+        var next = homeShelfGameAt(zone, (rail.currentIndex + 1) % model.count)
+        queueUpperArtwork(game, previous, next)
+        sendBottomPreview(game, previous, next, null)
+    }
+
+    function activateHomeListPreview() {
+        if (!previewReady || page !== "home" || homeViewMode !== "list") return
+        if (homeListEntries.length <= 0 || homeListRail.currentIndex < 0) {
+            homePreviewGame = null
+            currentBottomPreviewGame = null
+            currentBottomPreviewSequence = 0
+            requestPreviewEndpoint("blank")
+            return
+        }
+        var selectedIndex = homeListRail.currentIndex
+        var game = homeListGameAt(selectedIndex)
+        var slot = freeSlot(null, null)
+        assignSlot(slot, "home-list-" + homeListCategory,
+                   systemRail.currentIndex, selectedIndex, game)
+        activePreviewSlot = slot
+        var previous = homeListGameAt((selectedIndex - 1 + homeListEntries.length) %
+                                      homeListEntries.length)
+        var next = homeListGameAt((selectedIndex + 1) % homeListEntries.length)
         queueUpperArtwork(game, previous, next)
         sendBottomPreview(game, previous, next, null)
     }
@@ -1371,6 +1763,7 @@ FocusScope {
         api.memory.set("thoriumPage", page)
         api.memory.set("thoriumSortMode", sortMode)
         api.memory.set("thoriumGameView", gameViewMode)
+        api.memory.set("thoriumHomeView", homeViewMode)
     }
 
     function enterCollection() {
@@ -1381,6 +1774,7 @@ FocusScope {
         activeSystemIndex = systemRail.currentIndex
         allSystemsActive = activeSystemIndex === 0
         activeCollection = allSystemsActive ? null : collectionAtSystem(activeSystemIndex)
+        activateCachedSystemSort()
         page = "games"
         gameRail.currentIndex = 0
         scheduleNavigationPersistence()
@@ -1408,6 +1802,7 @@ FocusScope {
         activeSystemIndex = target
         allSystemsActive = target === 0
         activeCollection = allSystemsActive ? null : collectionAtSystem(target)
+        activateCachedSystemSort()
         systemRail.currentIndex = target
         gameRail.currentIndex = 0
         scheduleNavigationPersistence()
@@ -1461,30 +1856,20 @@ FocusScope {
     }
 
     function focusHomeZone(zone) {
-        homeZone = Math.max(0, Math.min(4, zone))
+        homeZone = Math.max(0, Math.min(7, zone))
         if (homeZone === 0) {
             chooseSystemWallpaper(systemRail.currentIndex)
             activateHomePreview(false)
             systemRail.forceActiveFocus()
-        } else if (homeZone === 1) {
-            activateShelfPreview(1)
-            recentRail.forceActiveFocus()
-        } else if (homeZone === 2) {
-            activateShelfPreview(2)
-            mostPlayedRail.forceActiveFocus()
-        } else if (homeZone === 3) {
-            activateShelfPreview(3)
-            recentlyAddedRail.forceActiveFocus()
         } else {
-            activateShelfPreview(4)
-            topGamesRail.forceActiveFocus()
+            activateShelfPreview(homeZone)
+            homeShelfRail(homeZone).forceActiveFocus()
         }
     }
 
     function stepHomeShelf(direction) {
-        var rail = homeZone === 1 ? recentRail :
-                   homeZone === 2 ? mostPlayedRail :
-                   homeZone === 3 ? recentlyAddedRail : topGamesRail
+        var rail = homeShelfRail(homeZone)
+        if (!rail) return
         if (direction < 0)
             rail.decrementCurrentIndex()
         else
@@ -1555,8 +1940,8 @@ FocusScope {
     }
 
     Component.onCompleted: {
-        rebuildVisibleSystems()
         rebuildRecentlyAddedModel()
+        rebuildVisibleSystems()
         detectPreviewCapabilities()
         systemMotionEnabled = false
         api.memory.set("thoriumSystemMotion", false)
@@ -1566,6 +1951,8 @@ FocusScope {
         // preference, but the calm, undistorted surface is the default.
         liquidGlassEnabled = api.memory.has("thoriumLiquidGlassEnabled") ?
                 Boolean(api.memory.get("thoriumLiquidGlassEnabled")) : false
+        systemLedEnabled = api.memory.has("lucentSystemLedEnabled") ?
+                Boolean(api.memory.get("lucentSystemLedEnabled")) : true
         // Sound is on by default.  Migrate existing installs once because the
         // original theme persisted OFF even though the requested default is ON.
         if (!api.memory.has("parallaxPreviewSoundDefaultV1")) {
@@ -1578,6 +1965,7 @@ FocusScope {
         }
         requestPreviewEndpoint("settings/sound?enabled=" +
                 (previewSoundEnabled ? "1" : "0"))
+        systemLedCommit.restart()
         var rememberedSystem = api.memory.has("thoriumSystem") ? api.memory.get("thoriumSystem") : 0
         // Version 1 inserts All Systems ahead of the old Arcade index. Shift a
         // saved pre-aggregate selection once so it still points to the same
@@ -1598,10 +1986,13 @@ FocusScope {
         }
         gameViewMode = api.memory.has("thoriumGameView") ?
                 api.memory.get("thoriumGameView") : "covers"
+        homeViewMode = api.memory.has("thoriumHomeView") ?
+                api.memory.get("thoriumHomeView") : "covers"
         if (rememberedPage === "games") {
             activeSystemIndex = systemRail.currentIndex
             allSystemsActive = activeSystemIndex === 0
             activeCollection = allSystemsActive ? null : collectionAtSystem(activeSystemIndex)
+            activateCachedSystemSort()
             page = "games"
         } else {
             page = "home"
@@ -1620,22 +2011,39 @@ FocusScope {
         Qt.callLater(function() {
             if (root.page === "games") {
                 gameRail.currentIndex = Math.max(0,
-                        Math.min(activeGameSortModel.count - 1, rememberedGame))
+                        Math.min(activeGameCount - 1, rememberedGame))
                 if (root.gameViewMode === "list")
                     gameListRail.positionViewAtIndex(gameRail.currentIndex, ListView.Center)
                 else
                     gameRail.positionViewAtIndex(gameRail.currentIndex, ListView.Center)
                 root.activateGamePreview()
             } else {
-                systemRail.positionViewAtIndex(systemRail.currentIndex, ListView.Center)
-                root.activateHomePreview(true)
+                if (root.homeViewMode === "list") {
+                    root.homeListCategory = 1
+                    root.rebuildHomeList()
+                } else {
+                    systemRail.positionViewAtIndex(systemRail.currentIndex, ListView.Center)
+                    root.activateHomePreview(true)
+                }
             }
         })
         root.forceActiveFocus()
     }
 
     Keys.onPressed: {
-        if (gameActionOpen) {
+        if (updatePromptOpen) {
+            if (event.key === Qt.Key_Left || event.key === Qt.Key_Right ||
+                    event.key === Qt.Key_Up || event.key === Qt.Key_Down)
+                updatePromptChoice = updatePromptChoice === 0 ? 1 : 0
+            else if (api.keys.isAccept(event)) {
+                if (updatePromptChoice === 0) installReadyUpdate()
+                else dismissReadyUpdate()
+            } else if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
+                       event.key === Qt.Key_Escape) {
+                dismissReadyUpdate()
+            }
+            event.accepted = true
+        } else if (gameActionOpen) {
             if (gameActionMode === "rename" && renameField.activeFocus) {
                 if (api.keys.isCancel(event) || event.key === Qt.Key_Back || event.key === Qt.Key_Escape) {
                     Qt.inputMethod.reset()
@@ -1676,16 +2084,19 @@ FocusScope {
             } else {
                 event.accepted = false
             }
-        } else if (searchOpen && api.keys.isCancel(event)) {
+        } else if (searchOpen && (api.keys.isCancel(event) ||
+                                  event.key === Qt.Key_Back ||
+                                  event.key === Qt.Key_Escape)) {
             endSearch()
             event.accepted = true
         } else if (settingsOpen) {
-            if (api.keys.isCancel(event) || api.keys.isFilters(event) || api.keys.isDetails(event)) {
+            if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
+                    event.key === Qt.Key_Escape || api.keys.isDetails(event)) {
                 settingsOpen = false
             } else if (event.key === Qt.Key_Up) {
                 settingsIndex = Math.max(0, settingsIndex - 1)
             } else if (event.key === Qt.Key_Down) {
-                settingsIndex = Math.min(4, settingsIndex + 1)
+                settingsIndex = Math.min(5, settingsIndex + 1)
             } else if (event.key === Qt.Key_Left) {
                 activateSetting(-1)
             } else if (event.key === Qt.Key_Right) {
@@ -1695,7 +2106,53 @@ FocusScope {
             }
             event.accepted = true
         } else if (page === "home") {
-            if (event.key === Qt.Key_Up) {
+            if (api.keys.isDetails(event)) {
+                settingsOpen = true
+                settingsIndex = 0
+                event.accepted = true
+            } else if (api.keys.isFilters(event)) {
+                toggleHomeView()
+                event.accepted = true
+            } else if (homeViewMode === "list") {
+                var homeSystemDirection = triggerDirection(event)
+                if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
+                        event.key === Qt.Key_Escape) {
+                    if (homeListFocusColumn === 1) {
+                        homeListFocusColumn = 0
+                        rebuildHomeList()
+                    }
+                } else if (homeSystemDirection !== 0) {
+                    rememberHandledTrigger(homeSystemDirection)
+                    stepSystem(homeSystemDirection)
+                } else if (api.keys.isPrevPage(event)) {
+                    cycleHomeListCategory(-1)
+                } else if (api.keys.isNextPage(event)) {
+                    cycleHomeListCategory(1)
+                } else if (event.key === Qt.Key_Left) {
+                    cycleHomeListCategory(-1)
+                } else if (event.key === Qt.Key_Right) {
+                    if (homeListFocusColumn === 0)
+                        enterHomeListGames()
+                    else
+                        cycleHomeListCategory(1)
+                } else if (event.key === Qt.Key_Up) {
+                    if (homeListFocusColumn === 0)
+                        stepSystem(-1)
+                    else if (homeListEntries.length > 0)
+                        homeListRail.decrementCurrentIndex()
+                } else if (event.key === Qt.Key_Down) {
+                    if (homeListFocusColumn === 0)
+                        stepSystem(1)
+                    else if (homeListEntries.length > 0)
+                        homeListRail.incrementCurrentIndex()
+                } else if (api.keys.isAccept(event)) {
+                    if (homeListFocusColumn === 0)
+                        enterHomeListGames()
+                    else
+                        launch(activeGame)
+                }
+                event.accepted = true
+            } else if (event.key === Qt.Key_Up) {
                 focusHomeZone(homeZone - 1)
                 event.accepted = true
             } else if (event.key === Qt.Key_Down) {
@@ -1713,10 +2170,6 @@ FocusScope {
                 else
                     root.stepHomeShelf(1)
                 event.accepted = true
-            } else if (api.keys.isFilters(event) || api.keys.isDetails(event)) {
-                settingsOpen = true
-                settingsIndex = 0
-                event.accepted = true
             } else if (api.keys.isAccept(event)) {
                 if (homeZone === 0)
                     enterCollection()
@@ -1730,11 +2183,19 @@ FocusScope {
             // alias. On the first press after reversing L2/R2, this Qt build
             // can briefly retain the previous semantic alias; checking
             // Cancel/PageUp first swallowed that otherwise valid scan code.
-            if (openSystemDirection !== 0) {
+            if (api.keys.isDetails(event)) {
+                settingsOpen = true
+                settingsIndex = 0
+                event.accepted = true
+            } else if (api.keys.isFilters(event)) {
+                toggleGameView()
+                event.accepted = true
+            } else if (openSystemDirection !== 0) {
                 rememberHandledTrigger(openSystemDirection)
                 stepOpenSystem(openSystemDirection)
                 event.accepted = true
-            } else if (api.keys.isCancel(event)) {
+            } else if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
+                       event.key === Qt.Key_Escape) {
                 returnHome()
                 event.accepted = true
             } else if (event.key === 1048576 &&
@@ -1755,9 +2216,6 @@ FocusScope {
                 event.accepted = true
             } else if (api.keys.isNextPage(event)) {
                 cycleSort(1)
-                event.accepted = true
-            } else if (api.keys.isDetails(event) || api.keys.isFilters(event)) {
-                toggleGameView()
                 event.accepted = true
             } else if (event.key === Qt.Key_Left) {
                 if (gameViewMode === "list")
@@ -1791,17 +2249,19 @@ FocusScope {
     }
 
     Keys.onReleased: {
-        if (searchField.activeFocus || root.page !== "games" || root.settingsOpen)
+        if (searchField.activeFocus || root.settingsOpen ||
+                (root.page !== "games" &&
+                 !(root.page === "home" && root.homeViewMode === "list")))
             return
         var direction = root.triggerDirection(event)
         if (direction < 0) {
             if (!root.leftTriggerPressHandled)
-                root.stepOpenSystem(-1)
+                root.page === "games" ? root.stepOpenSystem(-1) : root.stepSystem(-1)
             root.leftTriggerPressHandled = false
             event.accepted = true
         } else if (direction > 0) {
             if (!root.rightTriggerPressHandled)
-                root.stepOpenSystem(1)
+                root.page === "games" ? root.stepOpenSystem(1) : root.stepSystem(1)
             root.rightTriggerPressHandled = false
             event.accepted = true
         }
@@ -1942,7 +2402,9 @@ FocusScope {
                     // Rebuild the complete warm set after launch/resume. A
                     // current-only refresh would evict the preloaded neighbors
                     // and reintroduce a black frame on the very first move.
-                    if (root.page === "home" && root.homeZone === 0)
+                    if (root.page === "home" && root.homeViewMode === "list")
+                        root.activateHomeListPreview()
+                    else if (root.page === "home" && root.homeZone === 0)
                         root.activateHomePreview(false)
                     else if (root.page === "games")
                         root.activateGamePreview()
@@ -1970,6 +2432,35 @@ FocusScope {
     }
 
     Timer {
+        interval: 1800
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: root.pollUpdateStatus()
+    }
+
+    Timer {
+        id: libraryIndexRetry
+        interval: 900
+        repeat: false
+        onTriggered: root.loadLibraryIndex()
+    }
+
+    Timer {
+        id: libraryIndexBuildTimer
+        interval: 1
+        repeat: false
+        onTriggered: root.continueLibraryIndexBuild()
+    }
+
+    Timer {
+        id: systemLedCommit
+        interval: 12
+        repeat: false
+        onTriggered: root.applySystemLedColor()
+    }
+
+    Timer {
         id: navigationPersistence
         interval: 220
         repeat: false
@@ -1987,6 +2478,13 @@ FocusScope {
                 return
             root.activateHomePreview(false)
         }
+    }
+
+    Timer {
+        id: homeListRebuild
+        interval: 1
+        repeat: false
+        onTriggered: root.rebuildHomeList()
     }
 
     Timer {
@@ -2014,7 +2512,7 @@ FocusScope {
             if (root.page !== "games")
                 return
             gameRail.currentIndex = 0
-            if (activeGameSortModel.count > 0) {
+            if (activeGameCount > 0) {
                 if (root.gameViewMode === "list")
                     gameListRail.positionViewAtIndex(0, ListView.Beginning)
                 else
@@ -2081,27 +2579,27 @@ FocusScope {
         // hardware/product lifecycle rather than online-service availability.
         ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
         ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#35d0e6" }
-        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#f4c84a" }
-        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#ff9f43" }
-        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#f4c84a" }
-        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#ff9f43" }
-        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#ff9f43" }
+        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#4fd17f" }
+        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#ff9f43" }
+        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#4fd17f" }
+        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#ff9f43" }
         ListElement { name: "PLAYSTATION"; years: "1994–2006"; mark: "PS1"; collectionName: "Sony PlayStation"; folder: "psx"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; accent: "#f4c84a" }
-        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; accent: "#ff9f43" }
-        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; accent: "#ff9f43" }
+        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; accent: "#4fd17f" }
+        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; accent: "#ff9f43" }
         ListElement { name: "PLAYSTATION 2"; years: "2000–2013"; mark: "PS2"; collectionName: "Sony PlayStation 2"; folder: "ps2"; accent: "#a987ff" }
-        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#f4c84a" }
-        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#f4c84a" }
-        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#f4c84a" }
+        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#ff9f43" }
         ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; accent: "#a987ff" }
         ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#f4c84a" }
-        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#ff9f43" }
         ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#f4c84a" }
-        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#57d68d" }
-        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#ff9f43" }
+        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#4aa3ff" }
+        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#ff9f43" }
     }
 
     // Predecode official platform logotypes used by the rail. Full-resolution system
@@ -2162,24 +2660,6 @@ FocusScope {
     // from the ROM mtime during the companion update.
     ListModel {
         id: recentlyAddedModel
-    }
-
-    SortFilterProxyModel {
-        id: topGamesModel
-        sourceModel: api.allGames
-        // Native critic score first; the persistent ascending user-score key
-        // breaks ties without a JavaScript comparator.
-        sorters: [
-            RoleSorter { roleName: "rating"; sortOrder: Qt.DescendingOrder },
-            RoleSorter { roleName: "sortBy"; sortOrder: Qt.AscendingOrder }
-        ]
-        filters: [
-            RangeFilter { roleName: "rating"; minimumValue: 0.01 },
-            ExpressionFilter {
-                expression: root.isLucentLibraryGame(api.allGames.get(index)) &&
-                            root.gameVisibleAfterMutation(api.allGames.get(index))
-            }
-        ]
     }
 
     // Filter the aggregate library only once, then keep four native sort
@@ -2306,8 +2786,7 @@ FocusScope {
 
         Item {
             id: shelfCard
-            property var game: ListView.view.zone === 3 ?
-                    root.recentlyAddedGame(index) : modelData
+            property var game: root.homeShelfGameAt(ListView.view.zone, index)
             property bool isSelected: ListView.isCurrentItem &&
                     root.homeZone === ListView.view.zone
             property real coverAspect: shelfCover.status === Image.Ready &&
@@ -2372,13 +2851,14 @@ FocusScope {
                 height: 34
                 text: root.scoreText(game)
                 color: root.accentForGame(game)
-                wrapMode: Text.Wrap
-                maximumLineCount: 2
-                elide: Text.ElideRight
+                wrapMode: Text.NoWrap
+                maximumLineCount: 1
+                fontSizeMode: Text.HorizontalFit
+                minimumPixelSize: 11
                 font.family: global.fonts.sans
-                font.pixelSize: 15
+                font.pixelSize: 14
                 font.weight: Font.Bold
-                font.letterSpacing: 0.3
+                font.letterSpacing: 0
                 style: Text.Outline
                 styleColor: "#d0000000"
             }
@@ -2687,9 +3167,11 @@ FocusScope {
         // be substantially larger without covering a title, score, sort
         // control, or game row. Dual-screen Thor geometry is untouched because
         // this item is disabled there.
-        x: parent.width - width - 56
-        y: 102
-        width: root.page === "games" && root.gameViewMode === "list" ? 624 : 392
+        property bool compactHomeList: root.page === "home" && root.homeViewMode === "list"
+        x: compactHomeList ? parent.width - width - 226 : parent.width - width - 56
+        y: compactHomeList ? 112 : 102
+        width: compactHomeList ? 330 :
+               (root.page === "games" && root.gameViewMode === "list" ? 624 : 392)
         height: Math.round(width * 9 / 16)
         visible: root.previewPlacementMode !== "off" &&
                  !root.useBottomPreview() && root.singleCurrentSlot >= 0
@@ -2719,13 +3201,13 @@ FocusScope {
             source: root.singleSourceA
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 0
-            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
+            loops: root.randomHomePreviewActive() ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 0 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(0)
-            onStopped: if (root.singleCurrentSlot === 0 && root.page === "home" && root.homeZone === 0)
-                           Qt.callLater(function() { root.activateHomePreview(true) })
+            onStopped: if (root.singleCurrentSlot === 0 && root.randomHomePreviewActive())
+                           Qt.callLater(function() { root.advanceRandomHomePreview() })
         }
 
         Video {
@@ -2735,13 +3217,13 @@ FocusScope {
             source: root.singleSourceB
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 1
-            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
+            loops: root.randomHomePreviewActive() ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 1 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(1)
-            onStopped: if (root.singleCurrentSlot === 1 && root.page === "home" && root.homeZone === 0)
-                           Qt.callLater(function() { root.activateHomePreview(true) })
+            onStopped: if (root.singleCurrentSlot === 1 && root.randomHomePreviewActive())
+                           Qt.callLater(function() { root.advanceRandomHomePreview() })
         }
 
         Video {
@@ -2751,13 +3233,13 @@ FocusScope {
             source: root.singleSourceC
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 2
-            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
+            loops: root.randomHomePreviewActive() ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 2 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(2)
-            onStopped: if (root.singleCurrentSlot === 2 && root.page === "home" && root.homeZone === 0)
-                           Qt.callLater(function() { root.activateHomePreview(true) })
+            onStopped: if (root.singleCurrentSlot === 2 && root.randomHomePreviewActive())
+                           Qt.callLater(function() { root.advanceRandomHomePreview() })
         }
     }
 
@@ -2806,7 +3288,7 @@ FocusScope {
                          root.homeZone === 0
 
                 Repeater {
-                    model: ["arcade", "nintendo", "sony", "sega", "microsoft"]
+                    model: root.availableBrandSlugs
 
                     Item {
                         width: modelData === "arcade" ? 122 :
@@ -3078,7 +3560,9 @@ FocusScope {
             Text {
                 x: 58
                 y: 148
-                width: parent.width - 116
+                width: root.homeViewMode === "list" ?
+                       ((!root.dualScreenDevice ? singleScreenPip.x : homeListBoxArt.x) - x - 28) :
+                       parent.width - 116
                 visible: root.homeZone > 0
                 text: root.activeGame ? root.displayTitle(root.activeGame) : "CONTINUE PLAYING"
                 color: "white"
@@ -3106,7 +3590,9 @@ FocusScope {
                 x: 62
                 y: 262
                 visible: root.homeZone > 0
-                text: root.homeShelfName(root.homeZone) + "     A  PLAY"
+                text: root.homeShelfName(root.homeZone) +
+                      (root.homeViewMode === "list" && root.homeListFocusColumn === 0 ?
+                       "     RANDOM PREVIEW  •  A  SELECT SYSTEM" : "     A  PLAY")
                 color: "#aeb6c8"
                 font.family: global.fonts.sans
                 font.pixelSize: 17
@@ -3115,6 +3601,7 @@ FocusScope {
 
             ListView {
                 id: systemRail
+                visible: root.homeViewMode === "covers"
                 x: 0
                 y: 350
                 width: parent.width
@@ -3154,7 +3641,10 @@ FocusScope {
                 keyNavigationEnabled: false
                 onCurrentIndexChanged: {
                     if (root.previewReady) {
-                        if (root.page === "home" && root.homeZone === 0) {
+                        if (root.page === "home" && root.homeViewMode === "list") {
+                            root.chooseSystemWallpaper(systemRail.currentIndex)
+                            homeListRebuild.restart()
+                        } else if (root.page === "home" && root.homeZone === 0) {
                             // Keep the D-pad event turn identical to gameRail:
                             // update selection now, coalesce expensive visual
                             // and preview work immediately afterward.
@@ -3256,6 +3746,7 @@ FocusScope {
             }
 
             Rectangle {
+                visible: root.homeViewMode === "covers"
                 x: 58
                 y: 580
                 width: parent.width - 116
@@ -3265,6 +3756,7 @@ FocusScope {
 
             Item {
                 id: shelfViewport
+                visible: root.homeViewMode === "covers"
                 x: 0
                 y: 594
                 width: parent.width
@@ -3274,7 +3766,7 @@ FocusScope {
                 Item {
                     id: shelfStack
                     width: parent.width
-                    height: 1760
+                    height: 3080
                     y: -Math.max(0, root.homeZone - 1) * 440
                     Behavior on y { NumberAnimation { duration: 210; easing.type: Easing.OutCubic } }
 
@@ -3409,7 +3901,7 @@ FocusScope {
                         Text {
                             x: 58
                             y: 16
-                            text: "TOP GAMES"
+                            text: "CRITIC SCORE"
                             color: root.homeZone === 4 ? "white" : "#8f98aa"
                             font.family: global.fonts.sans
                             font.pixelSize: 18
@@ -3418,19 +3910,19 @@ FocusScope {
                         }
 
                         ListView {
-                            id: topGamesRail
+                            id: criticRail
                             property int zone: 4
                             x: 0
                             y: 66
                             width: parent.width
                             height: 360
                             orientation: ListView.Horizontal
-                            model: topGamesModel
+                            model: allCriticSortModel
                             delegate: homeShelfCard
                             spacing: 18
                             clip: false
-                            header: Item { width: Math.max(0, (topGamesRail.width - 238) / 2); height: topGamesRail.height }
-                            footer: Item { width: Math.max(0, (topGamesRail.width - 238) / 2); height: topGamesRail.height }
+                            header: Item { width: Math.max(0, (criticRail.width - 238) / 2); height: criticRail.height }
+                            footer: Item { width: Math.max(0, (criticRail.width - 238) / 2); height: criticRail.height }
                             focus: root.homeZone === 4
                             highlightMoveDuration: 180
                             highlightRangeMode: ListView.ApplyRange
@@ -3440,6 +3932,420 @@ FocusScope {
                             keyNavigationEnabled: false
                             onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 4) root.activateShelfPreview(4)
                         }
+                    }
+
+                    Item {
+                        y: 1760
+                        width: parent.width
+                        height: 440
+
+                        Text {
+                            x: 58; y: 16
+                            text: "USER SCORE"
+                            color: root.homeZone === 5 ? "white" : "#8f98aa"
+                            font.family: global.fonts.sans
+                            font.pixelSize: 18
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 3
+                        }
+
+                        ListView {
+                            id: userRail
+                            property int zone: 5
+                            x: 0; y: 66
+                            width: parent.width; height: 360
+                            orientation: ListView.Horizontal
+                            model: allUserSortModel
+                            delegate: homeShelfCard
+                            spacing: 18; clip: false
+                            header: Item { width: Math.max(0, (userRail.width - 238) / 2); height: userRail.height }
+                            footer: Item { width: Math.max(0, (userRail.width - 238) / 2); height: userRail.height }
+                            focus: root.homeZone === 5
+                            highlightMoveDuration: 180
+                            highlightRangeMode: ListView.ApplyRange
+                            preferredHighlightBegin: (width - 238) / 2
+                            preferredHighlightEnd: (width - 238) / 2
+                            keyNavigationWraps: true
+                            keyNavigationEnabled: false
+                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 5) root.activateShelfPreview(5)
+                        }
+                    }
+
+                    Item {
+                        y: 2200
+                        width: parent.width
+                        height: 440
+
+                        Text {
+                            x: 58; y: 16
+                            text: "A–Z"
+                            color: root.homeZone === 6 ? "white" : "#8f98aa"
+                            font.family: global.fonts.sans
+                            font.pixelSize: 18
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 3
+                        }
+
+                        ListView {
+                            id: alphaRail
+                            property int zone: 6
+                            x: 0; y: 66
+                            width: parent.width; height: 360
+                            orientation: ListView.Horizontal
+                            model: allAlphaSortModel
+                            delegate: homeShelfCard
+                            spacing: 18; clip: false
+                            header: Item { width: Math.max(0, (alphaRail.width - 238) / 2); height: alphaRail.height }
+                            footer: Item { width: Math.max(0, (alphaRail.width - 238) / 2); height: alphaRail.height }
+                            focus: root.homeZone === 6
+                            highlightMoveDuration: 180
+                            highlightRangeMode: ListView.ApplyRange
+                            preferredHighlightBegin: (width - 238) / 2
+                            preferredHighlightEnd: (width - 238) / 2
+                            keyNavigationWraps: true
+                            keyNavigationEnabled: false
+                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 6) root.activateShelfPreview(6)
+                        }
+                    }
+
+                    Item {
+                        y: 2640
+                        width: parent.width
+                        height: 440
+
+                        Text {
+                            x: 58; y: 16
+                            text: "RELEASE DATE"
+                            color: root.homeZone === 7 ? "white" : "#8f98aa"
+                            font.family: global.fonts.sans
+                            font.pixelSize: 18
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 3
+                        }
+
+                        ListView {
+                            id: releaseRail
+                            property int zone: 7
+                            x: 0; y: 66
+                            width: parent.width; height: 360
+                            orientation: ListView.Horizontal
+                            model: allReleaseSortModel
+                            delegate: homeShelfCard
+                            spacing: 18; clip: false
+                            header: Item { width: Math.max(0, (releaseRail.width - 238) / 2); height: releaseRail.height }
+                            footer: Item { width: Math.max(0, (releaseRail.width - 238) / 2); height: releaseRail.height }
+                            focus: root.homeZone === 7
+                            highlightMoveDuration: 180
+                            highlightRangeMode: ListView.ApplyRange
+                            preferredHighlightBegin: (width - 238) / 2
+                            preferredHighlightEnd: (width - 238) / 2
+                            keyNavigationWraps: true
+                            keyNavigationEnabled: false
+                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 7) root.activateShelfPreview(7)
+                        }
+                    }
+                }
+            }
+
+            Item {
+                id: homeListBoxArt
+                visible: root.homeViewMode === "list" && root.activeGame
+                x: parent.width - width - 58
+                y: 108
+                width: 150
+                height: 198
+                z: 82
+
+                Image {
+                    anchors.fill: parent
+                    source: root.activeGame ? (root.activeGame.assets.boxFront || "") : ""
+                    fillMode: Image.PreserveAspectFit
+                    horizontalAlignment: Image.AlignRight
+                    verticalAlignment: Image.AlignVCenter
+                    asynchronous: true
+                    cache: true
+                    smooth: true
+                    mipmap: true
+                }
+            }
+
+            Item {
+                id: homeListPanel
+                x: 48
+                y: 324
+                width: parent.width - 96
+                height: 708
+                visible: root.homeViewMode === "list"
+
+                Rectangle {
+                    x: 0
+                    y: 0
+                    width: 560
+                    height: parent.height
+                    color: "#9b080c13"
+                    border.width: 1
+                    border.color: "#2effffff"
+                    radius: 8
+
+                    ListView {
+                        id: homeSystemList
+                        x: 10
+                        y: 10
+                        width: parent.width - 20
+                        height: parent.height - 20
+                        model: systemModel
+                        currentIndex: systemRail.currentIndex
+                        spacing: 4
+                        clip: true
+                        keyNavigationEnabled: false
+                        highlightMoveDuration: 110
+                        highlightRangeMode: ListView.ApplyRange
+                        preferredHighlightBegin: (height - 70) / 2
+                        preferredHighlightEnd: (height - 70) / 2
+
+                        delegate: Rectangle {
+                            id: homeSystemRow
+                            property bool isSelected: ListView.isCurrentItem
+                            width: homeSystemList.width
+                            height: 70
+                            color: isSelected ? model.accent :
+                                   (index % 2 === 0 ? "#66060a10" : "#76060a10")
+                            border.width: isSelected ? 2 : 1
+                            border.color: isSelected ?
+                                          Qt.lighter(model.accent, 1.15) :
+                                          "#25ffffff"
+                            radius: 6
+
+                            Image {
+                                id: homeSystemLogo
+                                x: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 112
+                                height: 44
+                                source: model.folder === "all" ? "" :
+                                        Qt.resolvedUrl("assets/logos-png/" + model.folder + ".png")
+                                visible: model.folder !== "all" && status !== Image.Error
+                                fillMode: Image.PreserveAspectFit
+                                horizontalAlignment: Image.AlignLeft
+                                asynchronous: true
+                                cache: true
+                                smooth: true
+                                mipmap: true
+                            }
+
+                            Text {
+                                x: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 112
+                                visible: model.folder === "all" || homeSystemLogo.status === Image.Error
+                                text: model.folder === "all" ? "ALL SYSTEMS" : model.mark
+                                color: homeSystemRow.isSelected ? "#071016" : "white"
+                                horizontalAlignment: Text.AlignHCenter
+                                font.family: global.fonts.condensed
+                                font.pixelSize: model.folder === "all" ? 17 : 25
+                                font.weight: Font.Black
+                            }
+
+                            Text {
+                                x: 142
+                                y: 12
+                                width: parent.width - 232
+                                text: model.name
+                                color: homeSystemRow.isSelected ? "#071016" : "#eef1f6"
+                                fontSizeMode: Text.HorizontalFit
+                                minimumPixelSize: 14
+                                font.family: global.fonts.sans
+                                font.pixelSize: 18
+                                font.weight: Font.Bold
+                            }
+
+                            Text {
+                                x: 142
+                                y: 40
+                                text: model.years
+                                color: homeSystemRow.isSelected ? "#18251f" : model.accent
+                                font.family: global.fonts.sans
+                                font.pixelSize: 12
+                                font.weight: Font.Bold
+                                font.letterSpacing: 1.2
+                            }
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.systemGameCount(index)
+                                color: homeSystemRow.isSelected ? "#071016" : "#aeb6c8"
+                                font.family: global.fonts.condensed
+                                font.pixelSize: 21
+                                font.weight: Font.Bold
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    systemRail.currentIndex = index
+                                    root.homeListFocusColumn = 0
+                                    root.rebuildHomeList()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Item {
+                    x: 584
+                    y: 0
+                    width: parent.width - x
+                    height: parent.height
+
+                    Row {
+                        id: homeCategoryTabs
+                        x: 0
+                        y: 0
+                        width: parent.width
+                        height: 58
+                        spacing: 8
+
+                        Repeater {
+                            model: ["CONTINUE", "MOST PLAYED", "RECENTLY ADDED",
+                                    "CRITIC", "USER", "A–Z", "RELEASE"]
+                            Rectangle {
+                                property int category: index + 1
+                                property bool isSelected: root.homeListCategory === category
+                                width: (homeCategoryTabs.width - 48) / 7
+                                height: 58
+                                color: isSelected ?
+                                       Qt.rgba(root.accent.r, root.accent.g,
+                                               root.accent.b, 0.90) : "#76060a10"
+                                border.width: isSelected ? 2 : 1
+                                border.color: isSelected ?
+                                              Qt.lighter(root.accent, 1.15) :
+                                              "#30ffffff"
+                                radius: 7
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    width: parent.width - 14
+                                    text: modelData
+                                    color: parent.isSelected ? "#071016" : "#e3e7ef"
+                                    horizontalAlignment: Text.AlignHCenter
+                                    fontSizeMode: Text.HorizontalFit
+                                    minimumPixelSize: 10
+                                    font.family: global.fonts.sans
+                                    font.pixelSize: 13
+                                    font.weight: Font.Bold
+                                    font.letterSpacing: 0.45
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        root.homeListCategory = parent.category
+                                        root.homeListFocusColumn = 1
+                                        root.rebuildHomeList()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    ListView {
+                        id: homeListRail
+                        x: 0
+                        y: 72
+                        width: parent.width
+                        height: parent.height - 72
+                        model: root.homeListEntries
+                        spacing: 4
+                        clip: true
+                        keyNavigationEnabled: false
+                        highlightMoveDuration: 100
+                        highlightRangeMode: ListView.ApplyRange
+                        preferredHighlightBegin: (height - 76) / 2
+                        preferredHighlightEnd: (height - 76) / 2
+                        onCurrentIndexChanged: {
+                            if (root.previewReady && root.page === "home" &&
+                                    root.homeViewMode === "list")
+                                root.activateHomeListPreview()
+                        }
+
+                        delegate: Rectangle {
+                            id: homeGameRow
+                            property bool isSelected: ListView.isCurrentItem &&
+                                    root.homeListFocusColumn === 1
+                            property var game: root.homeListGameAt(index)
+                            width: homeListRail.width
+                            height: 76
+                            color: isSelected ? root.accentForGame(game) :
+                                   (index % 2 === 0 ? "#78060a10" : "#86060a10")
+                            border.width: isSelected ? 2 : 1
+                            border.color: isSelected ?
+                                          Qt.lighter(root.accentForGame(game), 1.16) : "#30ffffff"
+                            radius: 7
+
+                            Text {
+                                x: 20
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 54
+                                text: (index < 9 ? "0" : "") + (index + 1)
+                                color: homeGameRow.isSelected ? "#03050a" : "#647087"
+                                font.family: global.fonts.condensed
+                                font.pixelSize: 19
+                                font.weight: Font.Bold
+                            }
+
+                            Text {
+                                x: 78
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - 580
+                                text: root.displayTitle(game)
+                                color: homeGameRow.isSelected ? "#03050a" : "#eef1f6"
+                                elide: Text.ElideRight
+                                font.family: global.fonts.sans
+                                font.pixelSize: 23
+                                font.weight: homeGameRow.isSelected ? Font.Bold : Font.DemiBold
+                            }
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 20
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 480
+                                text: root.gameFactsText(game)
+                                color: homeGameRow.isSelected ? "#03050a" : root.accentForGame(game)
+                                horizontalAlignment: Text.AlignRight
+                                fontSizeMode: Text.HorizontalFit
+                                minimumPixelSize: 14
+                                font.family: global.fonts.sans
+                                font.pixelSize: 18
+                                font.weight: Font.Bold
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                pressAndHoldInterval: 800
+                                onPressAndHold: root.openGameActions(game, index)
+                                onClicked: {
+                                    if (root.gameActionOpen) return
+                                    homeListRail.currentIndex = index
+                                    root.homeListFocusColumn = 1
+                                    root.launch(game)
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        anchors.centerIn: homeListRail
+                        visible: root.homeListEntries.length === 0
+                        text: "NO " + root.homeShelfName(root.homeListCategory) +
+                              " GAMES FOR " + systemModel.get(systemRail.currentIndex).name
+                        color: "#aeb6c8"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 22
+                        font.weight: Font.DemiBold
+                        font.letterSpacing: 1.2
                     }
                 }
             }
@@ -3521,8 +4427,8 @@ FocusScope {
                 x: 62
                 y: 286
                 text: (root.allSystemsActive || root.activeCollection) ?
-                      (activeGameSortModel.count > 0 ? gameRail.currentIndex + 1 : 0) +
-                      " / " + activeGameSortModel.count +
+                      (activeGameCount > 0 ? gameRail.currentIndex + 1 : 0) +
+                      " / " + activeGameCount +
                       "     SELECT TO PLAY" :
                       "ADD GAMES TO  /GAMES/" + systemModel.get(root.activeSystemIndex).folder
                 color: "#aeb6c8"
@@ -3633,7 +4539,7 @@ FocusScope {
                 width: parent.width - 48
                 height: 560
                 orientation: ListView.Horizontal
-                model: activeGameSortModel
+                model: activeGameModel
                 spacing: 22
                 clip: false
                 focus: root.page === "games"
@@ -3655,7 +4561,7 @@ FocusScope {
                 delegate: Item {
                     id: gameCard
                     property bool isSelected: ListView.isCurrentItem
-                    property var game: modelData
+                    property var game: root.gameAtDisplayIndex(index)
                     property real coverAspect: gameCover.status === Image.Ready &&
                             gameCover.sourceSize.height > 0 ?
                             gameCover.sourceSize.width / gameCover.sourceSize.height : 0.72
@@ -3717,11 +4623,12 @@ FocusScope {
                         color: root.accent
                         wrapMode: Text.Wrap
                         maximumLineCount: 2
-                        elide: Text.ElideRight
+                        fontSizeMode: Text.HorizontalFit
+                        minimumPixelSize: 12
                         font.family: global.fonts.sans
-                        font.pixelSize: 17
+                        font.pixelSize: 15
                         font.weight: Font.Bold
-                        font.letterSpacing: 0.2
+                        font.letterSpacing: 0
                         style: Text.Outline
                         styleColor: "#d0000000"
                     }
@@ -3806,7 +4713,7 @@ FocusScope {
                     width: parent.width - x
                     height: parent.height
                     orientation: ListView.Vertical
-                    model: activeGameSortModel
+                    model: activeGameModel
                     currentIndex: gameRail.currentIndex
                     spacing: 4
                     clip: true
@@ -3820,7 +4727,7 @@ FocusScope {
                     delegate: Rectangle {
                         id: gameListRow
                         property bool isSelected: ListView.isCurrentItem
-                        property var game: modelData
+                        property var game: root.gameAtDisplayIndex(index)
                         width: gameListRail.width
                         height: 76
                         color: "transparent"
@@ -3938,8 +4845,8 @@ FocusScope {
                 anchors.right: parent.right
                 anchors.rightMargin: 62
                 y: 1040
-                text: "L1 / R1  SORT     L2 / R2  SYSTEM     X / Y  VIEW: " + root.gameViewMode.toUpperCase() +
-                      "     D-PAD  NAVIGATE     B  BACK     A  PLAY     HOLD GAME  OPTIONS"
+                text: "L1 / R1  SORT     L2 / R2  SYSTEM     Y  VIEW: " + root.gameViewMode.toUpperCase() +
+                      "     X  SETTINGS     D-PAD  NAVIGATE     B  BACK     A  PLAY     HOLD GAME  OPTIONS"
                 color: "#7f899c"
                 font.family: global.fonts.sans
                 font.pixelSize: 15
@@ -3955,7 +4862,9 @@ FocusScope {
         anchors.rightMargin: 62
         y: 1040
         visible: root.page === "home" && !root.settingsOpen
-        text: "D-PAD  NAVIGATE     A  OPEN"
+        text: root.homeViewMode === "list" ?
+              "L1 / R1  VIEW     L2 / R2  SYSTEM     LEFT / RIGHT  VIEW     UP / DOWN  SELECT     Y  LAYOUT: LIST     X  SETTINGS     A  PLAY" :
+              "Y  VIEW: COVERS     X  SETTINGS     D-PAD  NAVIGATE     A  OPEN"
         color: "#7f899c"
         font.family: global.fonts.sans
         font.pixelSize: 15
@@ -3972,6 +4881,98 @@ FocusScope {
     }
 
     Rectangle {
+        id: updatePromptOverlay
+        z: 850
+        anchors.fill: parent
+        visible: root.updatePromptOpen
+        color: "#db04070c"
+
+        MouseArea { anchors.fill: parent }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 760
+            height: 390
+            color: "#f20a0e16"
+            border.width: 2
+            border.color: root.accent
+            radius: 12
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 54
+                text: "LUCENT UPDATE READY"
+                color: "white"
+                font.family: global.fonts.condensed
+                font.pixelSize: 48
+                font.weight: Font.Bold
+                font.letterSpacing: 1.4
+            }
+
+            Text {
+                x: 60
+                y: 130
+                width: parent.width - 120
+                text: root.updateStatusMessage !== "" ? root.updateStatusMessage :
+                      "A new signed Lucent package has been downloaded."
+                color: "#b8c1d1"
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                font.family: global.fonts.sans
+                font.pixelSize: 20
+            }
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 238
+                spacing: 24
+
+                Repeater {
+                    model: ["INSTALL", "LATER"]
+                    Rectangle {
+                        width: 270
+                        height: 82
+                        color: root.updatePromptChoice === index ? root.accent : "#7e121925"
+                        border.width: root.updatePromptChoice === index ? 3 : 1
+                        border.color: root.updatePromptChoice === index ?
+                                      Qt.lighter(root.accent, 1.18) : "#42ffffff"
+                        radius: 8
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            color: root.updatePromptChoice === index ? "#05070b" : "white"
+                            font.family: global.fonts.sans
+                            font.pixelSize: 24
+                            font.weight: Font.Bold
+                            font.letterSpacing: 1.4
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                root.updatePromptChoice = index
+                                if (index === 0) root.installReadyUpdate()
+                                else root.dismissReadyUpdate()
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 344
+                text: "LEFT / RIGHT  CHOOSE     A  CONFIRM     B  LATER"
+                color: "#7f899c"
+                font.family: global.fonts.sans
+                font.pixelSize: 14
+                font.letterSpacing: 1
+            }
+        }
+    }
+
+    Rectangle {
         id: gameActionOverlay
         z: 700
         anchors.fill: parent
@@ -3981,6 +4982,7 @@ FocusScope {
         MouseArea { anchors.fill: parent }
 
         Rectangle {
+            id: gameActionPanel
             anchors.centerIn: parent
             width: 820
             height: 520
@@ -4194,21 +5196,54 @@ FocusScope {
         visible: root.settingsOpen
         color: "#e905080d"
 
-        MouseArea { anchors.fill: parent }
+        // Four explicit dismissal zones avoid Qt's full-screen mouse catcher
+        // competing with the modal and its row controls on touch devices.
+        Item {
+            z: 1
+            anchors.fill: parent
+
+            MouseArea {
+                x: 0; y: 0
+                width: parent.width; height: settingsPanel.y
+                onClicked: { root.settingsOpen = false; root.forceActiveFocus() }
+            }
+            MouseArea {
+                x: 0; y: settingsPanel.y + settingsPanel.height
+                width: parent.width; height: parent.height - y
+                onClicked: { root.settingsOpen = false; root.forceActiveFocus() }
+            }
+            MouseArea {
+                x: 0; y: settingsPanel.y
+                width: settingsPanel.x; height: settingsPanel.height
+                onClicked: { root.settingsOpen = false; root.forceActiveFocus() }
+            }
+            MouseArea {
+                x: settingsPanel.x + settingsPanel.width; y: settingsPanel.y
+                width: parent.width - x; height: settingsPanel.height
+                onClicked: { root.settingsOpen = false; root.forceActiveFocus() }
+            }
+        }
 
         Rectangle {
+            id: settingsPanel
+            z: 2
             anchors.centerIn: parent
             width: 980
-            height: 900
+            height: 960
             color: "#f20d121a"
             border.width: 1
             border.color: root.accent
             radius: 8
 
+            // Consume taps inside the modal itself. Individual setting rows,
+            // declared later, remain above this catcher and keep their own
+            // actions; only the dimmed area outside dismisses the sheet.
+            MouseArea { anchors.fill: parent }
+
             Text {
                 x: 48
                 y: 38
-                text: "DISPLAY & LIBRARY SETTINGS"
+                text: "DISPLAY, LIBRARY & LIGHTING"
                 color: "white"
                 font.family: global.fonts.condensed
                 font.pixelSize: 42
@@ -4415,6 +5450,50 @@ FocusScope {
                 Text {
                     x: 28
                     y: 22
+                    text: "SYSTEM-MATCHED STICK LEDS"
+                    color: "white"
+                    font.family: global.fonts.sans
+                    font.pixelSize: 21
+                    font.weight: Font.Bold
+                    font.letterSpacing: 1
+                }
+                Text {
+                    x: 28
+                    y: 60
+                    text: "AYN Thor/Odin joystick rings follow the highlighted system color"
+                    color: "#9da7b8"
+                    font.family: global.fonts.sans
+                    font.pixelSize: 16
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 28
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.systemLedEnabled ? "ON" : "OFF"
+                    color: root.accent
+                    font.family: global.fonts.condensed
+                    font.pixelSize: 30
+                    font.weight: Font.Bold
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: { root.settingsIndex = 4; root.activateSetting(0) }
+                }
+            }
+
+            Rectangle {
+                x: 44
+                y: 790
+                width: parent.width - 88
+                height: 112
+                color: root.settingsIndex === 5 ? "#261f2a38" : "#9b111720"
+                border.width: root.settingsIndex === 5 ? 2 : 1
+                border.color: root.settingsIndex === 5 ? root.accent : "#30ffffff"
+                radius: 5
+
+                Text {
+                    x: 28
+                    y: 22
                     text: "UPDATE LIBRARY & LUCENT"
                     color: "white"
                     font.family: global.fonts.sans
@@ -4442,13 +5521,13 @@ FocusScope {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: { root.settingsIndex = 4; root.activateSetting(0) }
+                    onClicked: { root.settingsIndex = 5; root.activateSetting(0) }
                 }
             }
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: 832
+                y: 920
                 text: "UP / DOWN  SELECT     LEFT / RIGHT  CHANGE     B  CLOSE"
                 color: "#7f899c"
                 font.family: global.fonts.sans

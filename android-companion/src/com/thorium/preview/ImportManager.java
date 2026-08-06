@@ -66,6 +66,8 @@ final class ImportManager {
             "pegasus-frontend");
     private static final File PEGASUS_CONFIG = new File(Environment.getExternalStorageDirectory(),
             "Android/data/org.pegasus_frontend.android/files/pegasus-frontend");
+    private static final File LUCENT_CONFIG = new File(Environment.getExternalStorageDirectory(),
+            "Android/data/com.thorium.preview/files/pegasus-frontend");
     private static final File REGISTRY = new File(PEGASUS, "thorium-imports.json");
     private static final String BACKGROUND_SOURCE_WALLPAPER = "audited-wallpaper";
     private static final String BACKGROUND_SOURCE_LAUNCHBOX = "launchbox-fanart-background";
@@ -76,6 +78,8 @@ final class ImportManager {
             new ConcurrentHashMap<>();
     private static volatile boolean wallpaperQualityCacheLoaded;
     private static final File AUTO_METADATA = new File(new File(PEGASUS_CONFIG, "metafiles"),
+            "99-lucent-auto-import.metadata.pegasus.txt");
+    private static final File LUCENT_AUTO_METADATA = new File(new File(LUCENT_CONFIG, "metafiles"),
             "99-lucent-auto-import.metadata.pegasus.txt");
     private static final File LEGACY_AUTO_METADATA = new File(PEGASUS,
             "99-lucent-auto-import.metadata.pegasus.txt");
@@ -328,6 +332,8 @@ final class ImportManager {
         THORIUM_LEGACY_CONFIG_METADATA.delete();
         File metadataParent = AUTO_METADATA.getParentFile();
         if (metadataParent != null) metadataParent.mkdirs();
+        File lucentMetadataParent = LUCENT_AUTO_METADATA.getParentFile();
+        if (lucentMetadataParent != null) lucentMetadataParent.mkdirs();
         GAMES.mkdirs();
         File mediaRoot = mediaRoot();
         File cacheRoot = new File(PEGASUS, ".thorium-import-cache");
@@ -750,7 +756,9 @@ final class ImportManager {
 
     private static List<File> metadataFiles() {
         LinkedHashMap<String, File> files = new LinkedHashMap<>();
-        List<File> roots = Arrays.asList(PEGASUS, new File(PEGASUS_CONFIG, "metafiles"));
+        List<File> roots = Arrays.asList(PEGASUS,
+                new File(PEGASUS_CONFIG, "metafiles"),
+                new File(LUCENT_CONFIG, "metafiles"));
         for (File root : roots) {
             File[] metadata = root.listFiles((dir, name) ->
                     name.endsWith(".metadata.pegasus.txt") ||
@@ -2254,9 +2262,12 @@ final class ImportManager {
             activeGeneratedFiles.add(generatedName);
             writeTextAtomic(new File(AUTO_METADATA.getParentFile(), generatedName),
                     out.toString());
+            writeTextAtomic(new File(LUCENT_AUTO_METADATA.getParentFile(), generatedName),
+                    out.toString());
             writeTextAtomic(new File(PEGASUS, generatedName), out.toString());
         }
         cleanupGeneratedMetadata(AUTO_METADATA.getParentFile(), activeGeneratedFiles);
+        cleanupGeneratedMetadata(LUCENT_AUTO_METADATA.getParentFile(), activeGeneratedFiles);
         cleanupGeneratedMetadata(PEGASUS, activeGeneratedFiles);
         // A Pegasus metafile represents one collection. Older Lucent builds
         // placed several collection headers in this combined file, causing
@@ -2264,6 +2275,7 @@ final class ImportManager {
         // marker at the old path while the per-system files above own games.
         String retired = "# Retired combined Lucent metadata; per-system files are authoritative.\n";
         writeTextAtomic(AUTO_METADATA, retired);
+        writeTextAtomic(LUCENT_AUTO_METADATA, retired);
         writeTextAtomic(LEGACY_AUTO_METADATA, retired);
     }
 

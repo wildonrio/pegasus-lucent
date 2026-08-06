@@ -81,12 +81,16 @@ public final class PreviewService extends Service {
     };
     private ServerSocket server;
     private UpdateManager updateManager;
+    private LibraryIndexManager libraryIndexManager;
+    private ThorLedManager thorLedManager;
 
     @Override
     public void onCreate() {
         super.onCreate();
         importManager = new ImportManager(this);
         updateManager = new UpdateManager(this);
+        libraryIndexManager = new LibraryIndexManager();
+        thorLedManager = new ThorLedManager();
         if (ThemeInstaller.hasStorageAccess(this)) {
             ThemeInstaller.installBundledIfNeeded(this, () -> updateManager.checkAsync(false));
         }
@@ -297,6 +301,17 @@ public final class PreviewService extends Service {
                         .putExtra(EXTRA_SOUND_ENABLED, enabled));
                 respond(writer, "200 OK", "{\"ok\":true,\"soundEnabled\":"
                         + enabled + "}");
+            } else if ("/led".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                boolean enabled = !"0".equals(values.getOrDefault("enabled", "1"));
+                int brightness = 180;
+                try {
+                    brightness = Integer.parseInt(values.getOrDefault("brightness", "180"));
+                } catch (NumberFormatException ignored) {}
+                boolean applied = enabled && thorLedManager.setColor(
+                        values.getOrDefault("color", ""), brightness);
+                respond(writer, "200 OK", "{\"ok\":true,\"available\":" +
+                        thorLedManager.available() + ",\"applied\":" + applied + "}");
             } else if ("/blank".equals(path)) {
                 placementBlank = true;
                 suppressPlayUntil = SystemClock.elapsedRealtime() + 1500L;
@@ -311,6 +326,8 @@ public final class PreviewService extends Service {
                 respond(writer, "202 Accepted", importManager.statusJson());
             } else if ("/import/status".equals(path)) {
                 respond(writer, "200 OK", importManager.statusJson());
+            } else if ("/library/index".equals(path)) {
+                respond(writer, "200 OK", libraryIndexManager.json());
             } else if ("/archive/list".equals(path)) {
                 respond(writer, "200 OK", importManager.archiveJson());
             } else if ("/archive/include".equals(path)) {
