@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.1.1"
+    readonly property string lucentVersion: "3.2.0"
 
     property string page: "home"
     // 0 systems; 1 continue; 2 most played; 3 recently added;
@@ -6484,7 +6484,7 @@ FocusScope {
             }
             Text {
                 x: 58; y: 116; width: parent.width - 116
-                text: "A unified Android game library, media manager, and Lucent theme powered by Pegasus Frontend."
+                text: "A complete Android game library and a standalone theme, built on Pegasus Frontend."
                 wrapMode: Text.WordWrap
                 color: "#d8deea"
                 font.family: global.fonts.sans
@@ -6493,7 +6493,7 @@ FocusScope {
             }
             Text {
                 x: 58; y: 214; width: parent.width - 116
-                text: "PEGASUS FRONTEND\nCreated by Mátyás M. and contributors\nLicensed under GNU GPL version 3\nhttps://github.com/mmatyas/pegasus-frontend\n\nLUCENT\nLucent's Android integration and default theme are distributed under GPLv3-compatible terms. Other Pegasus themes remain supported and can be selected from Pegasus settings."
+                text: "PEGASUS FRONTEND\nCreated by Mátyás M. and contributors\nLicensed under GNU GPL version 3\nBase source: github.com/mmatyas/pegasus-frontend/tree/6b322063\n\nLUCENT APP\nModified Pegasus distribution licensed under GPLv3. Complete source and build scripts: github.com/wildonrio/pegasus-lucent\n\nLUCENT THEME\nAlso available independently under the MIT License. Other Pegasus themes remain supported."
                 wrapMode: Text.WordWrap
                 color: "#aeb7c8"
                 font.family: global.fonts.sans
@@ -6501,7 +6501,7 @@ FocusScope {
                 lineHeight: 1.35
             }
             Text {
-                x: 58; y: 490; width: parent.width - 116
+                x: 58; y: 522; width: parent.width - 116
                 text: "Platform names and logos are identification marks belonging to their respective owners. Their appearance does not imply sponsorship or endorsement."
                 wrapMode: Text.WordWrap
                 color: "#8f99aa"
@@ -6511,7 +6511,7 @@ FocusScope {
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: 600
+                y: 604
                 text: "A / B  CLOSE"
                 color: root.accent
                 font.family: global.fonts.sans

@@ -1,10 +1,13 @@
-# Pegasus Lucent
+# Lucent
 
-Lucent is a cinematic Pegasus Frontend theme and Android companion for handheld gaming devices. It supports conventional single-screen Android devices and dual-screen hardware such as the AYN Thor.
+Lucent is both a cinematic theme for Pegasus Frontend and a complete Android game-library application derived from Pegasus. It supports conventional single-screen Android devices and dual-screen hardware such as the AYN Thor.
 
 ## Download
 
-Install the single **Lucent unified APK** from the [latest release](https://github.com/wildonrio/pegasus-lucent/releases/latest). It contains Pegasus Frontend, the Lucent theme, the importer and media services, direct-launch bridges, updater, and the optional Thor Stop-button service. No separate Pegasus, theme ZIP, controller APK, or companion APK is required.
+The [latest release](https://github.com/wildonrio/pegasus-lucent/releases/latest) provides two downloads:
+
+- **Lucent App** — the recommended, complete APK. It contains Pegasus Frontend, the Lucent theme, importer and media services, direct-launch bridges, updater, and the optional Thor Stop-button service. No separate Pegasus, theme, controller, or companion installation is required.
+- **Lucent Theme** — the standalone theme ZIP for people who already use Pegasus and only want Lucent's visual experience. Android-only automation and services are not available from a QML theme alone.
 
 Lucent checks this repository at startup and can also check manually from Settings. When an update is available it asks before downloading and opens Android's standard installer confirmation; Android does not permit a normal third-party app to silently replace itself.
 
@@ -21,9 +24,9 @@ Lucent checks this repository at startup and can also check manually from Settin
 
 ## Installation
 
-1. Download and install `lucent-unified-<version>.apk` from the latest release.
+1. Download and install `lucent-<version>.apk` from the latest release.
 2. Open Lucent and grant the storage permissions Android requests. The first library discovery runs automatically.
-3. On an AYN Thor, enable **Pegasus Lucent Controller** in Android Accessibility settings if you want the one-second Stop-button shortcut.
+3. On an AYN Thor, enable **Lucent Stop Button** in Android Accessibility settings if you want the one-second Stop-button shortcut.
 
 On the Thor, a normal press of the square Stop/Select button is passed through unchanged as Select. Holding it continuously for one second closes the active game and restores Pegasus.
 
@@ -39,6 +42,6 @@ On the Thor, a normal press of the square Stop/Select button is passed through u
 
 Lucent does not bundle games, firmware, keys, or emulator binaries. It does not download ROMs. Library discovery and metadata generation happen on the device. Source files are deleted from Downloads only after a game import is verified.
 
-## License
+## Licensing
 
-Lucent's original code is released under the MIT License. Product names, platform logos, and other third-party artwork remain the property of their respective owners. Pegasus Frontend is a separate GPL-licensed project.
+The complete Lucent application is a modified Pegasus distribution licensed under GPLv3, with corresponding source and reproducible build instructions provided in this repository. The standalone `theme/` package is independently available under the MIT License. See [LICENSING.md](LICENSING.md), [SOURCE_OFFER.md](SOURCE_OFFER.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
