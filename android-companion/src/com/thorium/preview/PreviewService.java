@@ -34,6 +34,7 @@ public final class PreviewService extends Service {
     public static final String ACTION_AUDIO = "com.thorium.preview.AUDIO";
     public static final String ACTION_SUSPEND = "com.thorium.preview.SUSPEND";
     public static final String ACTION_LAUNCH = "com.thorium.preview.LAUNCH";
+    public static final String ACTION_COMPLETED = "com.thorium.preview.COMPLETED";
     public static final String EXTRA_VIDEO = "video";
     public static final String EXTRA_ART = "art";
     public static final String EXTRA_TITLE = "title";
@@ -44,6 +45,7 @@ public final class PreviewService extends Service {
     public static final String EXTRA_PRELOAD_AUX = "preload_aux";
     public static final String EXTRA_SOUND_ENABLED = "sound_enabled";
     public static final String EXTRA_SEQUENCE = "sequence";
+    public static final String EXTRA_ADVANCE = "advance";
     public static final int PORT = 43821;
 
     private volatile boolean running;
@@ -56,6 +58,7 @@ public final class PreviewService extends Service {
     private volatile long lastPegasusHeartbeat;
     private volatile long lastPreviewSequence;
     private volatile long requestedLaunchSequence;
+    private volatile long completedPreviewSequence;
     private ImportManager importManager;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable pegasusWatchdog = new Runnable() {
@@ -78,12 +81,16 @@ public final class PreviewService extends Service {
     };
     private ServerSocket server;
     private UpdateManager updateManager;
+    private LibraryIndexManager libraryIndexManager;
+    private ThorLedManager thorLedManager;
 
     @Override
     public void onCreate() {
         super.onCreate();
         importManager = new ImportManager(this);
         updateManager = new UpdateManager(this);
+        libraryIndexManager = new LibraryIndexManager();
+        thorLedManager = new ThorLedManager();
         if (ThemeInstaller.hasStorageAccess(this)) {
             ThemeInstaller.installBundledIfNeeded(this, () -> updateManager.checkAsync(false));
         }
@@ -118,6 +125,10 @@ public final class PreviewService extends Service {
             // never launch a game the user has already navigated away from.
             if (previewActive && sequence > 0L && sequence == lastPreviewSequence)
                 requestedLaunchSequence = sequence;
+        } else if (intent != null && ACTION_COMPLETED.equals(intent.getAction())) {
+            long sequence = intent.getLongExtra(EXTRA_SEQUENCE, 0L);
+            if (previewActive && sequence > 0L && sequence == lastPreviewSequence)
+                completedPreviewSequence = sequence;
         }
         startServer();
         return START_STICKY;
@@ -185,6 +196,7 @@ public final class PreviewService extends Service {
                 String preloadPrev = values.getOrDefault("preload_prev", "");
                 String preloadNext = values.getOrDefault("preload_next", "");
                 String preloadAux = values.getOrDefault("preload_aux", "");
+                boolean advance = "1".equals(values.getOrDefault("advance", "0"));
                 getSharedPreferences("preview", MODE_PRIVATE).edit()
                         .putString(EXTRA_VIDEO, video)
                         .putString(EXTRA_ART, art)
@@ -194,6 +206,7 @@ public final class PreviewService extends Service {
                         .putString(EXTRA_PRELOAD_PREV, preloadPrev)
                         .putString(EXTRA_PRELOAD_NEXT, preloadNext)
                         .putString(EXTRA_PRELOAD_AUX, preloadAux)
+                        .putBoolean(EXTRA_ADVANCE, advance)
                         .putLong(EXTRA_SEQUENCE, sequence)
                         .apply();
                 previewActive = true;
@@ -201,7 +214,7 @@ public final class PreviewService extends Service {
                 mainHandler.removeCallbacks(pegasusWatchdog);
                 mainHandler.postDelayed(pegasusWatchdog, 750L);
                 showPlayer(video, art, title, system, score,
-                        preloadPrev, preloadNext, preloadAux, sequence);
+                        preloadPrev, preloadNext, preloadAux, sequence, advance);
                 respond(writer, "200 OK", "{\"ok\":true}");
             } else if ("/launch/status".equals(path)) {
                 // Reading consumes the request. The localhost response reaches
@@ -209,7 +222,10 @@ public final class PreviewService extends Service {
                 // preventing a launch from repeating when Pegasus resumes.
                 long sequence = requestedLaunchSequence;
                 requestedLaunchSequence = 0L;
-                respond(writer, "200 OK", "{\"seq\":" + sequence + "}");
+                long completed = completedPreviewSequence;
+                completedPreviewSequence = 0L;
+                respond(writer, "200 OK", "{\"seq\":" + sequence +
+                        ",\"completedSeq\":" + completed + "}");
             } else if ("/heartbeat".equals(path)) {
                 long now = SystemClock.elapsedRealtime();
                 if (placementBlank) {
@@ -285,6 +301,17 @@ public final class PreviewService extends Service {
                         .putExtra(EXTRA_SOUND_ENABLED, enabled));
                 respond(writer, "200 OK", "{\"ok\":true,\"soundEnabled\":"
                         + enabled + "}");
+            } else if ("/led".equals(path)) {
+                Map<String, String> values = parseQuery(query);
+                boolean enabled = !"0".equals(values.getOrDefault("enabled", "1"));
+                int brightness = 180;
+                try {
+                    brightness = Integer.parseInt(values.getOrDefault("brightness", "180"));
+                } catch (NumberFormatException ignored) {}
+                boolean applied = enabled && thorLedManager.setColor(
+                        values.getOrDefault("color", ""), brightness);
+                respond(writer, "200 OK", "{\"ok\":true,\"available\":" +
+                        thorLedManager.available() + ",\"applied\":" + applied + "}");
             } else if ("/blank".equals(path)) {
                 placementBlank = true;
                 suppressPlayUntil = SystemClock.elapsedRealtime() + 1500L;
@@ -299,6 +326,8 @@ public final class PreviewService extends Service {
                 respond(writer, "202 Accepted", importManager.statusJson());
             } else if ("/import/status".equals(path)) {
                 respond(writer, "200 OK", importManager.statusJson());
+            } else if ("/library/index".equals(path)) {
+                respond(writer, "200 OK", libraryIndexManager.json());
             } else if ("/archive/list".equals(path)) {
                 respond(writer, "200 OK", importManager.archiveJson());
             } else if ("/archive/include".equals(path)) {
@@ -344,7 +373,7 @@ public final class PreviewService extends Service {
     private void showPlayer(String video, String art, String title,
                             String system, String score,
                             String preloadPrev, String preloadNext, String preloadAux,
-                            long sequence) {
+                            long sequence, boolean advance) {
         Intent update = new Intent(ACTION_UPDATE)
                 .setPackage(getPackageName())
                 .putExtra(EXTRA_VIDEO, video)
@@ -355,6 +384,7 @@ public final class PreviewService extends Service {
                 .putExtra(EXTRA_PRELOAD_PREV, preloadPrev)
                 .putExtra(EXTRA_PRELOAD_NEXT, preloadNext)
                 .putExtra(EXTRA_PRELOAD_AUX, preloadAux)
+                .putExtra(EXTRA_ADVANCE, advance)
                 .putExtra(EXTRA_SEQUENCE, sequence);
         if (PreviewActivity.isVisible()) {
             sendBroadcast(update);
@@ -376,6 +406,7 @@ public final class PreviewService extends Service {
                 .putExtra(EXTRA_PRELOAD_PREV, preloadPrev)
                 .putExtra(EXTRA_PRELOAD_NEXT, preloadNext)
                 .putExtra(EXTRA_PRELOAD_AUX, preloadAux)
+                .putExtra(EXTRA_ADVANCE, advance)
                 .putExtra(EXTRA_SEQUENCE, sequence);
         ActivityOptions options = ActivityOptions.makeBasic();
         int displayId = BootReceiver.secondaryDisplayId(this);
@@ -427,7 +458,8 @@ public final class PreviewService extends Service {
                 preferences.getString(EXTRA_PRELOAD_PREV, ""),
                 preferences.getString(EXTRA_PRELOAD_NEXT, ""),
                 preferences.getString(EXTRA_PRELOAD_AUX, ""),
-                preferences.getLong(EXTRA_SEQUENCE, 0L));
+                preferences.getLong(EXTRA_SEQUENCE, 0L),
+                preferences.getBoolean(EXTRA_ADVANCE, false));
     }
 
     private static Map<String, String> parseQuery(String query) throws Exception {

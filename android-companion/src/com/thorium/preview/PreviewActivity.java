@@ -44,6 +44,7 @@ public final class PreviewActivity extends Activity {
     private boolean soundEnabled;
     private long selectionGeneration;
     private long currentSequence;
+    private boolean advanceOnCompletion;
     private GestureDetector gestures;
     private static final long CROSSFADE_MS = 85L;
 
@@ -71,7 +72,8 @@ public final class PreviewActivity extends Activity {
                         intent.getStringExtra(PreviewService.EXTRA_PRELOAD_PREV),
                         intent.getStringExtra(PreviewService.EXTRA_PRELOAD_NEXT),
                         intent.getStringExtra(PreviewService.EXTRA_PRELOAD_AUX),
-                        intent.getLongExtra(PreviewService.EXTRA_SEQUENCE, 0L));
+                        intent.getLongExtra(PreviewService.EXTRA_SEQUENCE, 0L),
+                        intent.getBooleanExtra(PreviewService.EXTRA_ADVANCE, false));
             }
         }
     };
@@ -124,7 +126,8 @@ public final class PreviewActivity extends Activity {
                 value(getIntent(), preferences, PreviewService.EXTRA_PRELOAD_PREV),
                 value(getIntent(), preferences, PreviewService.EXTRA_PRELOAD_NEXT),
                 value(getIntent(), preferences, PreviewService.EXTRA_PRELOAD_AUX),
-                longValue(getIntent(), preferences, PreviewService.EXTRA_SEQUENCE));
+                longValue(getIntent(), preferences, PreviewService.EXTRA_SEQUENCE),
+                booleanValue(getIntent(), preferences, PreviewService.EXTRA_ADVANCE));
     }
 
     private static String value(Intent intent, SharedPreferences preferences, String key) {
@@ -135,6 +138,11 @@ public final class PreviewActivity extends Activity {
     private static long longValue(Intent intent, SharedPreferences preferences, String key) {
         return intent.hasExtra(key) ? intent.getLongExtra(key, 0L)
                 : preferences.getLong(key, 0L);
+    }
+
+    private static boolean booleanValue(Intent intent, SharedPreferences preferences, String key) {
+        return intent.hasExtra(key) ? intent.getBooleanExtra(key, false)
+                : preferences.getBoolean(key, false);
     }
 
     @Override
@@ -150,7 +158,8 @@ public final class PreviewActivity extends Activity {
                 safe(intent.getStringExtra(PreviewService.EXTRA_PRELOAD_PREV)),
                 safe(intent.getStringExtra(PreviewService.EXTRA_PRELOAD_NEXT)),
                 safe(intent.getStringExtra(PreviewService.EXTRA_PRELOAD_AUX)),
-                intent.getLongExtra(PreviewService.EXTRA_SEQUENCE, 0L));
+                intent.getLongExtra(PreviewService.EXTRA_SEQUENCE, 0L),
+                intent.getBooleanExtra(PreviewService.EXTRA_ADVANCE, false));
     }
 
     private void buildUi() {
@@ -255,7 +264,7 @@ public final class PreviewActivity extends Activity {
     private void showSelection(String video, String art, String title,
                                String system, String score,
                                String preloadPrev, String preloadNext, String preloadAux,
-                               long sequence) {
+                               long sequence, boolean advance) {
         final long generation = ++selectionGeneration;
         video = safe(video);
         art = safe(art);
@@ -263,6 +272,7 @@ public final class PreviewActivity extends Activity {
         system = safe(system);
         score = safe(score);
         currentSequence = sequence;
+        advanceOnCompletion = advance;
         preloadPrev = safe(preloadPrev);
         preloadNext = safe(preloadNext);
         preloadAux = safe(preloadAux);
@@ -297,6 +307,7 @@ public final class PreviewActivity extends Activity {
         artwork.animate().cancel();
         blackout.setVisibility(View.GONE);
         final PlayerSlot incoming = slots[incomingIndex];
+        incoming.setLooping(!advanceOnCompletion);
         final String selectedVideo = video;
         final String selectedPrevious = preloadPrev;
         final String selectedNext = preloadNext;
@@ -304,6 +315,7 @@ public final class PreviewActivity extends Activity {
         activeSlot = incomingIndex;
         final PlayerSlot outgoing = outgoingIndex >= 0 && outgoingIndex < slots.length
                 && outgoingIndex != incomingIndex ? slots[outgoingIndex] : null;
+        if (outgoing != null) outgoing.setLooping(true);
         // A warm neighbor is already advancing while transparent. A cold
         // selection keeps either the outgoing movie or its artwork visible;
         // normal browsing never reveals the black launch-time cover.
@@ -450,6 +462,7 @@ public final class PreviewActivity extends Activity {
         titleView.setText("");
         eyebrow.setText("");
         currentSequence = 0L;
+        advanceOnCompletion = false;
         launchButton.setVisibility(View.GONE);
         blackout.setVisibility(View.VISIBLE);
         blackout.bringToFront();
@@ -512,6 +525,7 @@ public final class PreviewActivity extends Activity {
         Runnable ready;
         boolean prepared;
         boolean firstFrameRendered;
+        boolean looping = true;
 
         PlayerSlot() {
             view.setSurfaceTextureListener(this);
@@ -541,6 +555,15 @@ public final class PreviewActivity extends Activity {
             }
         }
 
+        void setLooping(boolean looping) {
+            this.looping = looping;
+            if (player == null) return;
+            try {
+                player.setLooping(looping);
+            } catch (RuntimeException ignored) {
+            }
+        }
+
         private void open() {
             if (pendingSource == null || pendingSource.isEmpty() || !view.isAvailable()) return;
             try {
@@ -551,7 +574,7 @@ public final class PreviewActivity extends Activity {
                         + " exists=" + file.isFile() + " bytes=" + file.length());
                 player = new MediaPlayer();
                 player.setSurface(new Surface(view.getSurfaceTexture()));
-                player.setLooping(true);
+                player.setLooping(looping);
                 // Warm neighbors begin silently. Only the slot that has
                 // rendered and been promoted by showSelection becomes audible.
                 player.setVolume(0f, 0f);
@@ -567,6 +590,24 @@ public final class PreviewActivity extends Activity {
                     applyCrop(mediaPlayer.getVideoWidth(), mediaPlayer.getVideoHeight());
                     prepared = true;
                     mediaPlayer.start();
+                });
+                // Game selections hard-loop here even on vendor players that
+                // emit completion despite looping. System-level previews report
+                // the boundary to Pegasus so it can select a different game.
+                player.setOnCompletionListener(mediaPlayer -> {
+                    if (activeSlot >= 0 && slots[activeSlot] == PlayerSlot.this &&
+                            advanceOnCompletion && currentSequence > 0L) {
+                        startService(new Intent(PreviewActivity.this, PreviewService.class)
+                                .setAction(PreviewService.ACTION_COMPLETED)
+                                .putExtra(PreviewService.EXTRA_SEQUENCE, currentSequence));
+                        return;
+                    }
+                    try {
+                        mediaPlayer.seekTo(0);
+                        mediaPlayer.start();
+                    } catch (Exception error) {
+                        Log.w("ThorPreview", "Unable to restart looping preview " + path, error);
+                    }
                 });
                 player.setOnInfoListener((mediaPlayer, what, extra) -> {
                     if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
@@ -621,6 +662,7 @@ public final class PreviewActivity extends Activity {
             ready = null;
             prepared = false;
             firstFrameRendered = false;
+            looping = true;
             if (player != null) {
                 try {
                     player.stop();
