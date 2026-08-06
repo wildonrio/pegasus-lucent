@@ -41,7 +41,7 @@ jobs:
         env:
           RELEASE_ASSET: ${{ steps.release.outputs.asset }}
         run: |
-          expected_sha="$(jq -r '.sha256' release-manifest.json)"
+          expected_sha="$(jq -r '.companionSha256' release-manifest.json)"
           echo "${expected_sha}  ${RELEASE_ASSET}" | sha256sum --check
 
       - name: Attach APK to this release
