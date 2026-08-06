@@ -138,12 +138,10 @@ final class ImportManager {
                     Collections.emptyList(), 0, false);
             return;
         }
-        // Downloads are only one ingress path. Games can also arrive through
-        // USB, another handheld, an SD-card move, or a file manager. Run the
-        // conservative full discovery on every fresh app/service launch; it
-        // skips every ROM already referenced by existing Pegasus metadata, so
-        // this remains incremental even for multi-thousand-game libraries.
-        startScan(true, false);
+        // App launch is deliberately lightweight: only Downloads are checked.
+        // A full-library artwork/score audit belongs on the desktop maintenance
+        // workflow, not in the handheld's startup path.
+        startScan(false, false);
     }
 
     /** User-requested maintenance pass. Unlike the background scan, this is a
@@ -420,7 +418,6 @@ final class ImportManager {
         // has no candidates on later launches and can never finish media.
         Set<String> queuedIdentities = new HashSet<>();
         for (ImportedGame game : imported) queuedIdentities.add(game.sourceIdentity);
-        List<ImportedGame> mediaRepairs = new ArrayList<>();
         for (int rowIndex = 0; rowIndex < registry.length(); rowIndex++) {
             JSONObject row = registry.optJSONObject(rowIndex);
             if (row == null || queuedIdentities.contains(row.optString("sourceIdentity"))) continue;
@@ -428,14 +425,6 @@ final class ImportManager {
             if (pending != null && row.optInt("enrichmentVersion", 0) < 2) {
                 imported.add(pending);
                 queuedIdentities.add(pending.sourceIdentity);
-            } else if (pending != null && needsMediaRepair(pending)) {
-                // A completed score lookup does not mean media exists. Older
-                // builds marked rows enriched even when a provider had not yet
-                // yielded a cover, wallpaper, or video, permanently preventing
-                // retries. Audit those gaps on every fresh service launch.
-                mediaRepairs.add(pending);
-                queuedIdentities.add(pending.sourceIdentity);
-                if (!titles.contains(pending.title)) titles.add(pending.title);
             }
         }
 
@@ -485,92 +474,15 @@ final class ImportManager {
             writeMetadata(registry);
         }
 
-        int registryMediaRepaired = 0;
-        if (!mediaRepairs.isEmpty()) {
-            setStatus("artwork", 0.88,
-                    "Repairing missing covers and wallpapers for " +
-                            mediaRepairs.size() + " games…",
-                    titles, imported.size(), !imported.isEmpty());
-            for (int mediaIndex = 0; mediaIndex < mediaRepairs.size(); mediaIndex++) {
-                ImportedGame game = mediaRepairs.get(mediaIndex);
-                setDetailedStatus("artwork",
-                        0.88 + 0.025 * (mediaIndex + 1) / mediaRepairs.size(),
-                        "Repairing missing covers and wallpapers…",
-                        game.system.collection + "  •  " + game.title,
-                        mediaIndex + 1, mediaRepairs.size(), titles,
-                        imported.size(), !imported.isEmpty());
-                boolean missingBoxBefore = missingMediaFile(game.boxArt);
-                boolean missingBackgroundBefore = missingMediaFile(game.background) ||
-                        !wallpaperCanvasIsValid(new File(game.background));
-                if (missingBoxBefore) enrichBoxArt(game, cacheRoot, mediaRoot);
-                if (missingBackgroundBefore) enrichBackground(game, cacheRoot, mediaRoot);
-                if (missingBoxBefore && !missingMediaFile(game.boxArt)) registryMediaRepaired++;
-                if (missingBackgroundBefore && !missingMediaFile(game.background))
-                    registryMediaRepaired++;
-            }
-            setStatus("video", 0.91,
-                    "Finding missing preview videos for " + mediaRepairs.size() + " games…",
-                    titles, imported.size(), !imported.isEmpty());
-            for (int mediaIndex = 0; mediaIndex < mediaRepairs.size(); mediaIndex++) {
-                ImportedGame game = mediaRepairs.get(mediaIndex);
-                setDetailedStatus("video",
-                        0.91 + 0.015 * (mediaIndex + 1) / mediaRepairs.size(),
-                        "Finding missing preview videos…",
-                        game.system.collection + "  •  " + game.title,
-                        mediaIndex + 1, mediaRepairs.size(), titles,
-                        imported.size(), !imported.isEmpty());
-                boolean missingVideoBefore = missingMediaFile(game.video);
-                if (missingVideoBefore) enrichVideo(game, cacheRoot, mediaRoot);
-                if (missingVideoBefore && !missingMediaFile(game.video)) registryMediaRepaired++;
-                registry = mergeRegistry(readRegistry(), Collections.singletonList(game));
-                writeJsonAtomic(REGISTRY, registry);
-                writeMetadata(registry);
-            }
-        }
-
-        // Publish provenance before the potentially long full-library media
-        // audit, then refresh it again after the audit below. A process kill
-        // can delay later repairs but cannot make completed screenshot
-        // fallbacks anonymous.
+        // Keep provenance current for the games processed in this scan. This
+        // is a local manifest write; it does not search or download old media.
         writeBackgroundProvenanceManifest(readRegistry(), mediaRoot);
-
-        setStatus("artwork", 0.93,
-                "Auditing the full library for missing covers, wallpapers, and videos…",
-                titles, imported.size(), !imported.isEmpty());
-        int repaired = registryMediaRepaired + repairMissingMedia(
-                cacheRoot, mediaRoot, titles, imported.size(), !imported.isEmpty());
-
-        setStatus("scores", 0.97, "Filling historical GameRankings critic scores…",
-                titles, imported.size(), !imported.isEmpty() || repaired > 0);
-        int scoreRepairs = repairMissingScores();
-
-        // The registry is the durable source of truth; this compact manifest
-        // is the human/tool-friendly audit surface. It is regenerated after
-        // every update scan so screenshots never become indistinguishable
-        // from genuine wallpaper merely because both fields are populated.
-        writeBackgroundProvenanceManifest(readRegistry(), mediaRoot);
-
-        int mediaGapGames = 0;
-        for (ImportedGame game : mediaRepairs)
-            if (needsMediaRepair(game)) mediaGapGames++;
 
         String message;
-        boolean reload = !imported.isEmpty() || repaired > 0 || scoreRepairs > 0;
+        boolean reload = !imported.isEmpty();
         if (!imported.isEmpty()) {
             message = imported.size() + (imported.size() == 1 ? " game added" : " games added");
-            if (repaired > 0) message += " • " + repaired + " media files repaired";
-            if (scoreRepairs > 0) message += " • " + scoreRepairs + " historical scores added";
             message += " • reload Pegasus when convenient";
-        } else if (repaired > 0 || scoreRepairs > 0) {
-            List<String> updates = new ArrayList<>();
-            if (repaired > 0) updates.add(repaired +
-                    (repaired == 1 ? " media file repaired" : " media files repaired"));
-            if (scoreRepairs > 0) updates.add(scoreRepairs + " historical scores added");
-            message = join(updates, " • ") + " • reload Pegasus when convenient";
-        } else if (mediaGapGames > 0) {
-            message = "Media audit complete • " + mediaGapGames +
-                    (mediaGapGames == 1 ? " game still needs a source" :
-                            " games still need sources") + " • retrying next launch";
         } else {
             message = "Library scan complete • no new games";
         }

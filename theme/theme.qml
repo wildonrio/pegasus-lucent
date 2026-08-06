@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.37"
+    readonly property string lucentVersion: "3.0.39"
 
     property string page: "home"
     // 0 systems; 1 continue; 2 most played; 3 recently added;
@@ -37,7 +37,8 @@ FocusScope {
     property int settingsIndex: 0
     property bool liquidGlassEnabled: false
     property bool systemLedEnabled: true
-    property int systemLedBrightness: 35
+    property bool systemLedUseDeviceBrightness: true
+    property int systemLedBrightness: 10
     property bool searchOpen: false
     property string searchQuery: ""
     property bool searchKeyboardAccepting: false
@@ -1234,7 +1235,8 @@ FocusScope {
     function applySystemLedColor() {
         if (!systemLedEnabled) return
         var hardwareBrightness = Math.round(255 * systemLedBrightness / 100)
-        requestPreviewEndpoint("led?enabled=1&brightness=" + hardwareBrightness +
+        requestPreviewEndpoint("led?enabled=1&brightness=" +
+                (systemLedUseDeviceBrightness ? "system" : hardwareBrightness) +
                 "&color=" + selectedLedColor())
     }
 
@@ -1248,9 +1250,19 @@ FocusScope {
     }
 
     function setSystemLedBrightness(value) {
-        var clamped = Math.max(5, Math.min(100, Number(value)))
-        systemLedBrightness = Math.round(clamped / 5) * 5
+        var clamped = Math.max(1, Math.min(100, Number(value)))
+        systemLedBrightness = Math.round(clamped)
+        systemLedUseDeviceBrightness = false
         api.memory.set("lucentSystemLedBrightness", systemLedBrightness)
+        api.memory.set("lucentSystemLedUseDeviceBrightness", false)
+        if (systemLedEnabled)
+            systemLedCommit.restart()
+    }
+
+    function setSystemLedUseDeviceBrightness(enabled) {
+        systemLedUseDeviceBrightness = Boolean(enabled)
+        api.memory.set("lucentSystemLedUseDeviceBrightness",
+                       systemLedUseDeviceBrightness)
         if (systemLedEnabled)
             systemLedCommit.restart()
     }
@@ -1270,8 +1282,11 @@ FocusScope {
         } else if (settingsIndex === 4) {
             if (direction === 0)
                 setSystemLedEnabled(!systemLedEnabled)
-            else
-                setSystemLedBrightness(systemLedBrightness + direction * 5)
+            else {
+                var base = systemLedUseDeviceBrightness ?
+                           (direction < 0 ? 2 : 9) : systemLedBrightness
+                setSystemLedBrightness(base + direction)
+            }
         } else {
             updatePromptDismissed = false
             importState = "idle"
@@ -2006,8 +2021,20 @@ FocusScope {
         systemLedEnabled = api.memory.has("lucentSystemLedEnabled") ?
                 Boolean(api.memory.get("lucentSystemLedEnabled")) : true
         systemLedBrightness = api.memory.has("lucentSystemLedBrightness") ?
-                Math.max(5, Math.min(100,
-                    Number(api.memory.get("lucentSystemLedBrightness")))) : 35
+                Math.max(1, Math.min(100,
+                    Number(api.memory.get("lucentSystemLedBrightness")))) : 10
+        systemLedUseDeviceBrightness = api.memory.has("lucentSystemLedUseDeviceBrightness") ?
+                Boolean(api.memory.get("lucentSystemLedUseDeviceBrightness")) : true
+        // The retired four-field LED command could leave this preference OFF
+        // while the hardware stayed bright white. Re-enable the corrected
+        // stock-format controller once; the user can still turn it off later.
+        if (!api.memory.has("lucentSystemLedControllerV2")) {
+            systemLedEnabled = true
+            systemLedUseDeviceBrightness = true
+            api.memory.set("lucentSystemLedEnabled", true)
+            api.memory.set("lucentSystemLedUseDeviceBrightness", true)
+            api.memory.set("lucentSystemLedControllerV2", true)
+        }
         // Sound is on by default.  Migrate existing installs once because the
         // original theme persisted OFF even though the requested default is ON.
         if (!api.memory.has("parallaxPreviewSoundDefaultV1")) {
@@ -2512,6 +2539,16 @@ FocusScope {
         id: systemLedCommit
         interval: 12
         repeat: false
+        onTriggered: root.applySystemLedColor()
+    }
+
+    // Stock Thor controls can reapply their static LED color after focus or
+    // power-state changes. Reassert the selected system color at low frequency;
+    // the companion preserves any externally changed AYN brightness value.
+    Timer {
+        interval: 750
+        repeat: true
+        running: root.systemLedEnabled
         onTriggered: root.applySystemLedColor()
     }
 
@@ -4208,21 +4245,24 @@ FocusScope {
                     y: 0
                     width: 560
                     height: parent.height
-                    color: "#9b080c13"
-                    border.width: 1
-                    border.color: "#2effffff"
-                    radius: 8
+                    color: "transparent"
+                    border.width: 0
 
                     ListView {
                         id: homeSystemList
                         x: 10
-                        y: 10
+                        y: 23
                         width: parent.width - 20
-                        height: parent.height - 20
+                        // Exactly nine 70 px rows plus eight 4 px gaps. The
+                        // viewport can never expose a fractional row.
+                        height: 662
                         model: systemModel
                         currentIndex: systemRail.currentIndex
                         spacing: 4
                         clip: true
+                        cacheBuffer: height * 2
+                        snapMode: ListView.SnapToItem
+                        boundsBehavior: Flickable.StopAtBounds
                         keyNavigationEnabled: false
                         highlightMoveDuration: 110
                         highlightRangeMode: ListView.ApplyRange
@@ -4236,10 +4276,7 @@ FocusScope {
                             height: 70
                             color: isSelected ? model.accent :
                                    (index % 2 === 0 ? "#66060a10" : "#76060a10")
-                            border.width: isSelected ? 2 : 1
-                            border.color: isSelected ?
-                                          Qt.lighter(model.accent, 1.15) :
-                                          "#25ffffff"
+                            border.width: 0
                             radius: 6
 
                             Image {
@@ -4379,12 +4416,17 @@ FocusScope {
                     ListView {
                         id: homeListRail
                         x: 0
-                        y: 72
+                        y: 76
                         width: parent.width
-                        height: parent.height - 72
+                        // Seven 76 px rows plus six 4 px gaps keeps the chosen
+                        // row centered without clipping the first or last row.
+                        height: 556
                         model: root.homeListEntries
                         spacing: 4
                         clip: true
+                        cacheBuffer: height * 2
+                        snapMode: ListView.SnapToItem
+                        boundsBehavior: Flickable.StopAtBounds
                         keyNavigationEnabled: false
                         highlightMoveDuration: 100
                         highlightRangeMode: ListView.ApplyRange
@@ -4405,9 +4447,7 @@ FocusScope {
                             height: 76
                             color: isSelected ? root.accentForGame(game) :
                                    (index % 2 === 0 ? "#78060a10" : "#86060a10")
-                            border.width: isSelected ? 2 : 1
-                            border.color: isSelected ?
-                                          Qt.lighter(root.accentForGame(game), 1.16) : "#30ffffff"
+                            border.width: 0
                             radius: 7
 
                             Text {
@@ -5586,7 +5626,7 @@ FocusScope {
                 Text {
                     x: 28
                     y: 60
-                    text: "Left / right adjusts brightness; A toggles the system-matched color"
+                    text: "Uses AYN brightness by default; left / right selects manual 1–100%"
                     color: "#9da7b8"
                     font.family: global.fonts.sans
                     font.pixelSize: 16
@@ -5615,7 +5655,9 @@ FocusScope {
                         anchors.fill: parent
                         onClicked: {
                             root.settingsIndex = 4
-                            root.setSystemLedBrightness(root.systemLedBrightness - 5)
+                            var base = root.systemLedUseDeviceBrightness ? 2 :
+                                       root.systemLedBrightness
+                            root.setSystemLedBrightness(base - 1)
                         }
                     }
                 }
@@ -5627,12 +5669,20 @@ FocusScope {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 124
                     horizontalAlignment: Text.AlignHCenter
-                    text: (root.systemLedEnabled ? "ON  " : "OFF  ") +
-                          root.systemLedBrightness + "%"
+                    text: !root.systemLedEnabled ? "OFF" :
+                          (root.systemLedUseDeviceBrightness ? "ON  SYSTEM" :
+                           "ON  " + root.systemLedBrightness + "%")
                     color: root.accent
                     font.family: global.fonts.condensed
                     font.pixelSize: 27
                     font.weight: Font.Bold
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.settingsIndex = 4
+                            root.setSystemLedUseDeviceBrightness(true)
+                        }
+                    }
                 }
 
                 Rectangle {
@@ -5659,7 +5709,9 @@ FocusScope {
                         anchors.fill: parent
                         onClicked: {
                             root.settingsIndex = 4
-                            root.setSystemLedBrightness(root.systemLedBrightness + 5)
+                            var base = root.systemLedUseDeviceBrightness ? 9 :
+                                       root.systemLedBrightness
+                            root.setSystemLedBrightness(base + 1)
                         }
                     }
                 }
