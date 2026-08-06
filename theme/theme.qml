@@ -9,10 +9,10 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.20"
+    readonly property string lucentVersion: "3.0.25"
 
     property string page: "home"
-    property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 top games
+    property int homeZone: 0 // 0 systems, 1 continue, 2 most played, 3 recently added, 4 top games
     property bool previewReady: false
     property double previewRequestSequence: Date.now()
     property double currentBottomPreviewSequence: 0
@@ -70,6 +70,9 @@ FocusScope {
     property bool importStatusInitialized: false
     property real importProgress: 0
     property string importMessage: ""
+    property string importDetail: ""
+    property int importCurrent: 0
+    property int importTotal: 0
     property var importTitles: []
     property int importIdentified: 0
     property int importAdded: 0
@@ -335,16 +338,41 @@ FocusScope {
         return proxyGame(topGamesModel, index)
     }
 
+    function recentlyAddedGame(index) {
+        if (index < 0 || index >= recentlyAddedModel.count)
+            return null
+        return api.allGames.get(recentlyAddedModel.get(index).sourceIndex)
+    }
+
+    function rebuildRecentlyAddedModel() {
+        var candidates = []
+        for (var index = 0; index < api.allGames.count; ++index) {
+            var game = api.allGames.get(index)
+            if (!isLucentLibraryGame(game) || !gameVisibleAfterMutation(game))
+                continue
+            var values = game.extra ? game.extra["added-at"] : null
+            var timestamp = Number(values || 0)
+            if (timestamp > 0)
+                candidates.push({ "sourceIndex": index, "timestamp": timestamp })
+        }
+        candidates.sort(function(left, right) { return right.timestamp - left.timestamp })
+        recentlyAddedModel.clear()
+        for (var candidate = 0; candidate < Math.min(60, candidates.length); ++candidate)
+            recentlyAddedModel.append(candidates[candidate])
+    }
+
     function homeShelfGame(zone) {
         if (zone === 1) return recentGame(recentRail.currentIndex)
         if (zone === 2) return mostPlayedGame(mostPlayedRail.currentIndex)
-        if (zone === 3) return topGame(topGamesRail.currentIndex)
+        if (zone === 3) return recentlyAddedGame(recentlyAddedRail.currentIndex)
+        if (zone === 4) return topGame(topGamesRail.currentIndex)
         return null
     }
 
     function homeShelfName(zone) {
         if (zone === 1) return "CONTINUE PLAYING"
         if (zone === 2) return "MOST PLAYED"
+        if (zone === 3) return "RECENTLY ADDED"
         return "TOP GAMES"
     }
 
@@ -721,6 +749,7 @@ FocusScope {
                 "&title=" + encodeURIComponent(title) +
                 "&system=" + encodeURIComponent(systemName) +
                 "&score=" + encodeURIComponent(score) +
+                "&advance=" + (page === "home" && homeZone === 0 ? "1" : "0") +
                 "&preload_prev=" + encodeURIComponent(videoSource(previousGame)) +
                 "&preload_next=" + encodeURIComponent(videoSource(nextGame)) +
                 "&preload_aux=" + encodeURIComponent(videoSource(auxiliaryGame))
@@ -778,6 +807,11 @@ FocusScope {
                         requestedSequence === root.currentBottomPreviewSequence &&
                         root.currentBottomPreviewGame)
                     root.launch(root.currentBottomPreviewGame)
+                var completedSequence = Number(payload.completedSeq || 0)
+                if (completedSequence > 0 &&
+                        completedSequence === root.currentBottomPreviewSequence &&
+                        root.page === "home" && root.homeZone === 0)
+                    Qt.callLater(function() { root.activateHomePreview(true) })
             } catch (error) {
                 // A missing optional companion must never affect navigation.
             }
@@ -982,6 +1016,8 @@ FocusScope {
         importStatusInitialized = true
         var fingerprint = String(payload.state || "idle") + "|" +
                 String(payload.progress || 0) + "|" + String(payload.message || "") + "|" +
+                String(payload.detail || "") + "|" + String(payload.current || 0) + "|" +
+                String(payload.total || 0) + "|" +
                 String(payload.identified || 0) + "|" + String(payload.added || 0) + "|" +
                 String(Boolean(payload.needsReload))
         var changed = fingerprint !== lastImportFingerprint
@@ -989,6 +1025,9 @@ FocusScope {
         importState = payload.state || "idle"
         importProgress = Number(payload.progress || 0)
         importMessage = payload.message || ""
+        importDetail = payload.detail || ""
+        importCurrent = Number(payload.current || 0)
+        importTotal = Number(payload.total || 0)
         importTitles = payload.titles || []
         importIdentified = Number(payload.identified || 0)
         importAdded = Number(payload.added || 0)
@@ -1280,16 +1319,22 @@ FocusScope {
     function activateShelfPreview(zone) {
         if (!previewReady) return
         var model = zone === 1 ? recentModel :
-                    zone === 2 ? mostPlayedModel : topGamesModel
+                    zone === 2 ? mostPlayedModel :
+                    zone === 3 ? recentlyAddedModel : topGamesModel
         var rail = zone === 1 ? recentRail :
-                   zone === 2 ? mostPlayedRail : topGamesRail
+                   zone === 2 ? mostPlayedRail :
+                   zone === 3 ? recentlyAddedRail : topGamesRail
         if (!model || model.count <= 0) return
-        var game = proxyGame(model, rail.currentIndex)
+        var game = zone === 3 ? recentlyAddedGame(rail.currentIndex) :
+                   proxyGame(model, rail.currentIndex)
         var slot = freeSlot(null, null)
         assignSlot(slot, "shelf" + zone, -1, rail.currentIndex, game)
         activePreviewSlot = slot
-        var previous = proxyGame(model, (rail.currentIndex - 1 + model.count) % model.count)
-        var next = proxyGame(model, (rail.currentIndex + 1) % model.count)
+        var previous = zone === 3 ?
+                recentlyAddedGame((rail.currentIndex - 1 + model.count) % model.count) :
+                proxyGame(model, (rail.currentIndex - 1 + model.count) % model.count)
+        var next = zone === 3 ? recentlyAddedGame((rail.currentIndex + 1) % model.count) :
+                   proxyGame(model, (rail.currentIndex + 1) % model.count)
         queueUpperArtwork(game, previous, next)
         sendBottomPreview(game, previous, next, null)
     }
@@ -1416,7 +1461,7 @@ FocusScope {
     }
 
     function focusHomeZone(zone) {
-        homeZone = Math.max(0, Math.min(3, zone))
+        homeZone = Math.max(0, Math.min(4, zone))
         if (homeZone === 0) {
             chooseSystemWallpaper(systemRail.currentIndex)
             activateHomePreview(false)
@@ -1427,15 +1472,19 @@ FocusScope {
         } else if (homeZone === 2) {
             activateShelfPreview(2)
             mostPlayedRail.forceActiveFocus()
-        } else {
+        } else if (homeZone === 3) {
             activateShelfPreview(3)
+            recentlyAddedRail.forceActiveFocus()
+        } else {
+            activateShelfPreview(4)
             topGamesRail.forceActiveFocus()
         }
     }
 
     function stepHomeShelf(direction) {
         var rail = homeZone === 1 ? recentRail :
-                   homeZone === 2 ? mostPlayedRail : topGamesRail
+                   homeZone === 2 ? mostPlayedRail :
+                   homeZone === 3 ? recentlyAddedRail : topGamesRail
         if (direction < 0)
             rail.decrementCurrentIndex()
         else
@@ -1507,6 +1556,7 @@ FocusScope {
 
     Component.onCompleted: {
         rebuildVisibleSystems()
+        rebuildRecentlyAddedModel()
         detectPreviewCapabilities()
         systemMotionEnabled = false
         api.memory.set("thoriumSystemMotion", false)
@@ -1781,7 +1831,7 @@ FocusScope {
         anchors.topMargin: 108
         anchors.rightMargin: 46
         width: 430
-        height: root.importIdentified > 0 ? 126 : 96
+        height: root.importDetail !== "" ? 148 : (root.importIdentified > 0 ? 126 : 96)
         visible: root.importToastVisible
         color: "#ee0b0f16"
         border.width: 1
@@ -1825,7 +1875,7 @@ FocusScope {
             x: 34
             y: 66
             width: parent.width - 50
-            visible: root.importIdentified > 0
+            visible: root.importDetail === "" && root.importIdentified > 0
             text: {
                 var shown = root.importTitles.slice(0, 2).join("  •  ")
                 if (root.importTitles.length > 2)
@@ -1837,6 +1887,31 @@ FocusScope {
             font.family: global.fonts.sans
             font.pixelSize: 11
             font.weight: Font.DemiBold
+        }
+
+        Text {
+            x: 34
+            y: 68
+            width: parent.width - 50
+            visible: root.importDetail !== ""
+            text: root.importDetail
+            color: root.accent
+            elide: Text.ElideMiddle
+            font.family: global.fonts.sans
+            font.pixelSize: 11
+            font.weight: Font.DemiBold
+        }
+
+        Text {
+            x: 34
+            y: 91
+            width: parent.width - 50
+            visible: root.importDetail !== "" && root.importTotal > 0
+            text: root.importCurrent + " OF " + root.importTotal
+            color: "#aeb7c8"
+            font.family: global.fonts.sans
+            font.pixelSize: 10
+            font.letterSpacing: 1.2
         }
 
         Rectangle {
@@ -2005,28 +2080,28 @@ FocusScope {
         // Chronological by first retail release. Years describe the primary
         // hardware/product lifecycle rather than online-service availability.
         ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
-        ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#ffb454" }
-        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#ff5c6c" }
-        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#24c7d9" }
-        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#ff5c6c" }
-        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#24c7d9" }
-        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#ff5c6c" }
-        ListElement { name: "PLAYSTATION"; years: "1994–2006"; mark: "PS1"; collectionName: "Sony PlayStation"; folder: "psx"; accent: "#6f8cff" }
-        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; accent: "#ff5c6c" }
-        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; accent: "#24c7d9" }
-        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; accent: "#ff5c6c" }
-        ListElement { name: "PLAYSTATION 2"; years: "2000–2013"; mark: "PS2"; collectionName: "Sony PlayStation 2"; folder: "ps2"; accent: "#6f8cff" }
-        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#ff5c6c" }
-        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#ff5c6c" }
-        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#ff5c6c" }
-        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; accent: "#6f8cff" }
-        ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; accent: "#6f8cff" }
-        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#ff5c6c" }
-        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#ff5c6c" }
-        ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; accent: "#6f8cff" }
-        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#ff5c6c" }
-        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#54d98c" }
-        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#ff5c6c" }
+        ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#35d0e6" }
+        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#f4c84a" }
+        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#ff9f43" }
+        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#f4c84a" }
+        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#ff9f43" }
+        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#f4c84a" }
+        ListElement { name: "PLAYSTATION"; years: "1994–2006"; mark: "PS1"; collectionName: "Sony PlayStation"; folder: "psx"; accent: "#a987ff" }
+        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; accent: "#f4c84a" }
+        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; accent: "#ff9f43" }
+        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; accent: "#f4c84a" }
+        ListElement { name: "PLAYSTATION 2"; years: "2000–2013"; mark: "PS2"; collectionName: "Sony PlayStation 2"; folder: "ps2"; accent: "#a987ff" }
+        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#f4c84a" }
+        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; accent: "#a987ff" }
+        ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; accent: "#a987ff" }
+        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#f4c84a" }
+        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#f4c84a" }
+        ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; accent: "#a987ff" }
+        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#f4c84a" }
+        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#57d68d" }
+        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#f4c84a" }
     }
 
     // Predecode official platform logotypes used by the rail. Full-resolution system
@@ -2079,6 +2154,14 @@ FocusScope {
                             root.gameVisibleAfterMutation(api.allGames.get(index))
             }
         ]
+    }
+
+    // Pegasus has no built-in "date added" role. Lucent writes an immutable
+    // x-added-at timestamp when a ROM first enters its registry, then builds a
+    // compact source-index rail here. Existing registry rows are backfilled
+    // from the ROM mtime during the companion update.
+    ListModel {
+        id: recentlyAddedModel
     }
 
     SortFilterProxyModel {
@@ -2223,7 +2306,8 @@ FocusScope {
 
         Item {
             id: shelfCard
-            property var game: modelData
+            property var game: ListView.view.zone === 3 ?
+                    root.recentlyAddedGame(index) : modelData
             property bool isSelected: ListView.isCurrentItem &&
                     root.homeZone === ListView.view.zone
             property real coverAspect: shelfCover.status === Image.Ready &&
@@ -2635,11 +2719,13 @@ FocusScope {
             source: root.singleSourceA
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 0
-            loops: MediaPlayer.Infinite
+            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 0 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(0)
+            onStopped: if (root.singleCurrentSlot === 0 && root.page === "home" && root.homeZone === 0)
+                           Qt.callLater(function() { root.activateHomePreview(true) })
         }
 
         Video {
@@ -2649,11 +2735,13 @@ FocusScope {
             source: root.singleSourceB
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 1
-            loops: MediaPlayer.Infinite
+            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 1 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(1)
+            onStopped: if (root.singleCurrentSlot === 1 && root.page === "home" && root.homeZone === 0)
+                           Qt.callLater(function() { root.activateHomePreview(true) })
         }
 
         Video {
@@ -2663,11 +2751,13 @@ FocusScope {
             source: root.singleSourceC
             fillMode: VideoOutput.PreserveAspectCrop
             muted: !root.previewSoundEnabled || root.singleCurrentSlot !== 2
-            loops: MediaPlayer.Infinite
+            loops: root.page === "home" && root.homeZone === 0 ? 1 : MediaPlayer.Infinite
             autoPlay: source !== ""
             opacity: root.singleCurrentSlot === 2 ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 85 } }
             onPositionChanged: if (position > 0) root.promoteSingleVideo(2)
+            onStopped: if (root.singleCurrentSlot === 2 && root.page === "home" && root.homeZone === 0)
+                           Qt.callLater(function() { root.activateHomePreview(true) })
         }
     }
 
@@ -3184,7 +3274,7 @@ FocusScope {
                 Item {
                     id: shelfStack
                     width: parent.width
-                    height: 1320
+                    height: 1760
                     y: -Math.max(0, root.homeZone - 1) * 440
                     Behavior on y { NumberAnimation { duration: 210; easing.type: Easing.OutCubic } }
 
@@ -3278,7 +3368,7 @@ FocusScope {
                         Text {
                             x: 58
                             y: 16
-                            text: "TOP GAMES"
+                            text: "RECENTLY ADDED"
                             color: root.homeZone === 3 ? "white" : "#8f98aa"
                             font.family: global.fonts.sans
                             font.pixelSize: 18
@@ -3287,8 +3377,49 @@ FocusScope {
                         }
 
                         ListView {
-                            id: topGamesRail
+                            id: recentlyAddedRail
                             property int zone: 3
+                            x: 0
+                            y: 66
+                            width: parent.width
+                            height: 360
+                            orientation: ListView.Horizontal
+                            model: recentlyAddedModel
+                            delegate: homeShelfCard
+                            spacing: 18
+                            clip: false
+                            header: Item { width: Math.max(0, (recentlyAddedRail.width - 238) / 2); height: recentlyAddedRail.height }
+                            footer: Item { width: Math.max(0, (recentlyAddedRail.width - 238) / 2); height: recentlyAddedRail.height }
+                            focus: root.homeZone === 3
+                            highlightMoveDuration: 180
+                            highlightRangeMode: ListView.ApplyRange
+                            preferredHighlightBegin: (width - 238) / 2
+                            preferredHighlightEnd: (width - 238) / 2
+                            keyNavigationWraps: true
+                            keyNavigationEnabled: false
+                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 3) root.activateShelfPreview(3)
+                        }
+                    }
+
+                    Item {
+                        y: 1320
+                        width: parent.width
+                        height: 440
+
+                        Text {
+                            x: 58
+                            y: 16
+                            text: "TOP GAMES"
+                            color: root.homeZone === 4 ? "white" : "#8f98aa"
+                            font.family: global.fonts.sans
+                            font.pixelSize: 18
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 3
+                        }
+
+                        ListView {
+                            id: topGamesRail
+                            property int zone: 4
                             x: 0
                             y: 66
                             width: parent.width
@@ -3300,14 +3431,14 @@ FocusScope {
                             clip: false
                             header: Item { width: Math.max(0, (topGamesRail.width - 238) / 2); height: topGamesRail.height }
                             footer: Item { width: Math.max(0, (topGamesRail.width - 238) / 2); height: topGamesRail.height }
-                            focus: root.homeZone === 3
+                            focus: root.homeZone === 4
                             highlightMoveDuration: 180
                             highlightRangeMode: ListView.ApplyRange
                             preferredHighlightBegin: (width - 238) / 2
                             preferredHighlightEnd: (width - 238) / 2
                             keyNavigationWraps: true
                             keyNavigationEnabled: false
-                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 3) root.activateShelfPreview(3)
+                            onCurrentIndexChanged: if (root.previewReady && root.page === "home" && root.homeZone === 4) root.activateShelfPreview(4)
                         }
                     }
                 }

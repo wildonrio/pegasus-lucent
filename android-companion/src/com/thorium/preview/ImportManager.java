@@ -477,7 +477,14 @@ final class ImportManager {
                     "Repairing missing covers and wallpapers for " +
                             mediaRepairs.size() + " games…",
                     titles, imported.size(), !imported.isEmpty());
-            for (ImportedGame game : mediaRepairs) {
+            for (int mediaIndex = 0; mediaIndex < mediaRepairs.size(); mediaIndex++) {
+                ImportedGame game = mediaRepairs.get(mediaIndex);
+                setDetailedStatus("artwork",
+                        0.88 + 0.025 * (mediaIndex + 1) / mediaRepairs.size(),
+                        "Repairing missing covers and wallpapers…",
+                        game.system.collection + "  •  " + game.title,
+                        mediaIndex + 1, mediaRepairs.size(), titles,
+                        imported.size(), !imported.isEmpty());
                 boolean missingBoxBefore = missingMediaFile(game.boxArt);
                 boolean missingBackgroundBefore = missingMediaFile(game.background) ||
                         !wallpaperCanvasIsValid(new File(game.background));
@@ -490,7 +497,14 @@ final class ImportManager {
             setStatus("video", 0.91,
                     "Finding missing preview videos for " + mediaRepairs.size() + " games…",
                     titles, imported.size(), !imported.isEmpty());
-            for (ImportedGame game : mediaRepairs) {
+            for (int mediaIndex = 0; mediaIndex < mediaRepairs.size(); mediaIndex++) {
+                ImportedGame game = mediaRepairs.get(mediaIndex);
+                setDetailedStatus("video",
+                        0.91 + 0.015 * (mediaIndex + 1) / mediaRepairs.size(),
+                        "Finding missing preview videos…",
+                        game.system.collection + "  •  " + game.title,
+                        mediaIndex + 1, mediaRepairs.size(), titles,
+                        imported.size(), !imported.isEmpty());
                 boolean missingVideoBefore = missingMediaFile(game.video);
                 if (missingVideoBefore) enrichVideo(game, cacheRoot, mediaRoot);
                 if (missingVideoBefore && !missingMediaFile(game.video)) registryMediaRepaired++;
@@ -509,7 +523,8 @@ final class ImportManager {
         setStatus("artwork", 0.93,
                 "Auditing the full library for missing covers, wallpapers, and videos…",
                 titles, imported.size(), !imported.isEmpty());
-        int repaired = registryMediaRepaired + repairMissingMedia(cacheRoot, mediaRoot);
+        int repaired = registryMediaRepaired + repairMissingMedia(
+                cacheRoot, mediaRoot, titles, imported.size(), !imported.isEmpty());
 
         setStatus("scores", 0.97, "Filling historical GameRankings critic scores…",
                 titles, imported.size(), !imported.isEmpty() || repaired > 0);
@@ -1656,13 +1671,15 @@ final class ImportManager {
                 missingMediaFile(game.video);
     }
 
-    private int repairMissingMedia(File cacheRoot, File mediaRoot) {
+    private int repairMissingMedia(File cacheRoot, File mediaRoot, List<String> statusTitles,
+                                   int added, boolean needsReload) {
         File[] files = PEGASUS.listFiles((dir, name) -> name.endsWith(".metadata.pegasus.txt") &&
                 !name.startsWith("99-lucent-auto-") &&
                 !name.startsWith("99-thorium-auto-"));
         if (files == null) return 0;
         int repaired = 0;
-        for (File metadata : files) {
+        for (int fileIndex = 0; fileIndex < files.length; fileIndex++) {
+            File metadata = files[fileIndex];
             try {
                 List<String> stanzas = splitStanzas(readText(metadata));
                 boolean changed = false;
@@ -1671,6 +1688,15 @@ final class ImportManager {
                     if (!stanza.startsWith("game:")) continue;
                     String title = field(stanza, "game");
                     String romPath = field(stanza, "file");
+                    if (i <= 1 || i % 20 == 0) {
+                        double fileFraction = stanzas.isEmpty() ? 1.0 :
+                                Math.min(1.0, (double)(i + 1) / stanzas.size());
+                        double overall = (fileIndex + fileFraction) / Math.max(1, files.length);
+                        setDetailedStatus("artwork", 0.93 + 0.035 * overall,
+                                "Auditing the full library media…",
+                                metadata.getName() + "  •  " + cleanTitle(title),
+                                fileIndex + 1, files.length, statusTitles, added, needsReload);
+                    }
                     String artPath = field(stanza, "assets.boxFront");
                     String backgroundPath = field(stanza, "assets.background");
                     String videoPath = field(stanza, "assets.video");
@@ -2072,7 +2098,17 @@ final class ImportManager {
         // registry fields from the current stanza with the same canonical ROM
         // path before rendering. The ROM path is deliberately the only join
         // key: similarly named regional releases must never borrow metadata.
-        if (hydrateRegistryFromExistingMetadata(registry))
+        boolean registryChanged = hydrateRegistryFromExistingMetadata(registry);
+        for (int i = 0; i < registry.length(); i++) {
+            JSONObject row = registry.optJSONObject(i);
+            if (row == null || row.optLong("addedAt", 0L) > 0L) continue;
+            File rom = new File(row.optString("file"));
+            long addedAt = rom.isFile() && rom.lastModified() > 0L ?
+                    rom.lastModified() : System.currentTimeMillis();
+            row.put("addedAt", addedAt);
+            registryChanged = true;
+        }
+        if (registryChanged)
             writeJsonAtomic(REGISTRY, registry);
         Map<String, LinkedHashMap<String, JSONObject>> groups = new LinkedHashMap<>();
         for (int i = 0; i < registry.length(); i++) {
@@ -2125,6 +2161,7 @@ final class ImportManager {
                 out.append("file: ").append(metadataSafe(row.optString("file"))).append('\n');
                 out.append("x-lucent-id: ")
                         .append(metadataSafe(row.optString("sourceIdentity"))).append('\n');
+                out.append("x-added-at: ").append(row.optLong("addedAt", 0L)).append('\n');
                 appendMetadataList(out, "developer", row.optJSONArray("developers"));
                 appendMetadataList(out, "publisher", row.optJSONArray("publishers"));
                 if (userScore > 0) {
@@ -2676,11 +2713,20 @@ final class ImportManager {
 
     private void setStatus(String state, double progress, String message, List<String> titles,
                            int added, boolean needsReload) {
+        setDetailedStatus(state, progress, message, "", 0, 0, titles, added, needsReload);
+    }
+
+    private void setDetailedStatus(String state, double progress, String message, String detail,
+                                   int current, int total, List<String> titles,
+                                   int added, boolean needsReload) {
         JSONObject next = new JSONObject();
         try {
             next.put("state", state);
             next.put("progress", Math.max(0, Math.min(1, progress)));
             next.put("message", message);
+            next.put("detail", detail == null ? "" : detail);
+            next.put("current", Math.max(0, current));
+            next.put("total", Math.max(0, total));
             next.put("titles", new JSONArray(titles));
             next.put("identified", titles.size());
             next.put("added", added);
@@ -2696,6 +2742,7 @@ final class ImportManager {
         try {
             value.put("state", "idle"); value.put("progress", 0);
             value.put("message", "Library importer ready"); value.put("titles", new JSONArray());
+            value.put("detail", ""); value.put("current", 0); value.put("total", 0);
             value.put("identified", 0); value.put("added", 0);
             value.put("needsReload", false); value.put("running", false);
         } catch (Exception ignored) {}
@@ -2751,15 +2798,19 @@ final class ImportManager {
         int gamerankingsReviews;
         boolean archived;
         boolean enriched;
+        long addedAt;
         ImportedGame(Candidate candidate, File rom) {
             this.system = candidate.system; this.sourceIdentity = candidate.identity;
             this.title = candidate.title; this.rom = rom;
+            this.addedAt = System.currentTimeMillis();
         }
 
         private ImportedGame(GameSystems.SystemDef system, String sourceIdentity,
                              String title, File rom) {
             this.system = system; this.sourceIdentity = sourceIdentity;
             this.title = title; this.rom = rom;
+            this.addedAt = rom.isFile() && rom.lastModified() > 0L ?
+                    rom.lastModified() : System.currentTimeMillis();
         }
 
         static ImportedGame fromJson(JSONObject value) {
@@ -2794,6 +2845,7 @@ final class ImportManager {
             game.metacriticReviews = value.optInt("metacriticReviews", 0);
             game.gamerankingsReviews = value.optInt("gamerankingsReviews", 0);
             game.archived = value.optBoolean("archived", false);
+            game.addedAt = value.optLong("addedAt", game.addedAt);
             game.enriched = value.optInt("enrichmentVersion", 0) >= 2;
             copyJsonStrings(value.optJSONArray("developers"), game.developers);
             copyJsonStrings(value.optJSONArray("publishers"), game.publishers);
@@ -2813,6 +2865,7 @@ final class ImportManager {
             try {
                 value.put("sourceIdentity", sourceIdentity); value.put("system", system.folder);
                 value.put("title", title); value.put("file", rom.getAbsolutePath());
+                value.put("addedAt", addedAt);
                 value.put("boxArt", boxArt); value.put("background", background);
                 value.put("backgroundSource", backgroundSource);
                 value.put("backgroundSourceUrl", backgroundSourceUrl);
