@@ -90,7 +90,7 @@ public final class PreviewService extends Service {
         importManager = new ImportManager(this);
         updateManager = new UpdateManager(this);
         libraryIndexManager = new LibraryIndexManager();
-        thorLedManager = new ThorLedManager();
+        thorLedManager = new ThorLedManager(this);
         if (ThemeInstaller.hasStorageAccess(this)) {
             ThemeInstaller.installBundledIfNeeded(this, () -> updateManager.checkAsync(false));
         }
@@ -304,14 +304,20 @@ public final class PreviewService extends Service {
             } else if ("/led".equals(path)) {
                 Map<String, String> values = parseQuery(query);
                 boolean enabled = !"0".equals(values.getOrDefault("enabled", "1"));
-                int brightness = 180;
-                try {
-                    brightness = Integer.parseInt(values.getOrDefault("brightness", "180"));
-                } catch (NumberFormatException ignored) {}
+                String brightnessValue = values.getOrDefault("brightness", "system");
+                int brightness = -1;
+                if (!"system".equalsIgnoreCase(brightnessValue)) {
+                    try {
+                        brightness = Integer.parseInt(brightnessValue);
+                    } catch (NumberFormatException ignored) {}
+                }
                 boolean applied = enabled && thorLedManager.setColor(
                         values.getOrDefault("color", ""), brightness);
                 respond(writer, "200 OK", "{\"ok\":true,\"available\":" +
-                        thorLedManager.available() + ",\"applied\":" + applied + "}");
+                        thorLedManager.available() + ",\"applied\":" + applied +
+                        ",\"brightness\":" + thorLedManager.appliedBrightness() +
+                        ",\"systemBrightness\":" +
+                        thorLedManager.rememberedDeviceBrightness() + "}");
             } else if ("/blank".equals(path)) {
                 placementBlank = true;
                 suppressPlayUntil = SystemClock.elapsedRealtime() + 1500L;
