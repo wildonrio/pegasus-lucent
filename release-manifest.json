@@ -1,10 +1,10 @@
 {
   "product": "Lucent",
-  "themeVersion": "3.1.1",
-  "themeZipUrl": "https://github.com/tyler-bam-ai/pegasus-lucent/releases/download/v3.1.1/pegasus-lucent-theme-3.1.1.zip",
-  "themeSha256": "ae527f516a8293761e644c7b43937217cb7f347ff2584577e2a7435fdfd4cfa9",
-  "companionVersionCode": 73,
-  "companionVersionName": "3.1.1",
-  "companionApkUrl": "https://github.com/tyler-bam-ai/pegasus-lucent/releases/download/v3.1.1/lucent-unified-3.1.1.apk",
-  "companionSha256": "a03add921b953fa56f3070fb5f378d7842c043a32971e0bd850636f3ddd38649"
+  "themeVersion": "3.2.0",
+  "themeZipUrl": "https://github.com/tyler-bam-ai/pegasus-lucent/releases/download/v3.2.0/lucent-theme-3.2.0.zip",
+  "themeSha256": "d7e0a568aaaa54523979065412ff955991bf5d1bb2ea862c27e555f649da0f06",
+  "companionVersionCode": 74,
+  "companionVersionName": "3.2.0",
+  "companionApkUrl": "https://github.com/tyler-bam-ai/pegasus-lucent/releases/download/v3.2.0/lucent-3.2.0.apk",
+  "companionSha256": "7ba8d787f58e2698f1c3d056e13f0c1eb415be5d063c6e1a3f8e5b1ee37c6591"
 }

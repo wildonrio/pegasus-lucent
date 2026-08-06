@@ -116,7 +116,7 @@ public final class MainActivity extends Activity {
         mark.setLetterSpacing(0.18f);
         content.addView(mark, matchWrap(0));
 
-        TextView title = label("Pegasus Lucent", 38, Color.WHITE);
+        TextView title = label("Lucent", 38, Color.WHITE);
         title.setTypeface(Typeface.create("sans", Typeface.BOLD));
         content.addView(title, matchWrap(dp(8)));
 

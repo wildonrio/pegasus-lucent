@@ -11,8 +11,8 @@ ANDROID_JAR="$SDK_DIR/platforms/$ANDROID_PLATFORM/android.jar"
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}
 APKTOOL=${APKTOOL:-/opt/homebrew/bin/apktool}
 BUILD_DIR="$PROJECT_DIR/build"
-VERSION_NAME=3.1.1
-VERSION_CODE=73
+VERSION_NAME=3.2.0
+VERSION_CODE=74
 BASE_NAME=pegasus-fe_alpha16-105-g6b322063_android64.apk
 BASE_URL="https://raw.githubusercontent.com/mmatyas/pegasus-deploy-staging/continuous-android64/$BASE_NAME"
 BASE_SHA256=e595be198bfd21c1855eaf563d5af0deae9c9601e6efb195ed299f2065287c67
@@ -85,10 +85,14 @@ perl -0pi -e 's#<application#<uses-permission android:name="android.permission.R
 mkdir -p "$DECODED/res/raw" "$DECODED/res/xml" "$DECODED/res/drawable" "$DECODED/assets"
 cp "$ROOT_DIR/android-companion/res/raw/"* "$DECODED/res/raw/"
 cp "$ROOT_DIR/android-launch-bridge/res/xml/stop_button_service.xml" "$DECODED/res/xml/"
-cp "$PROJECT_DIR/res/drawable/lucent_icon.xml" "$DECODED/res/drawable/"
+cp "$PROJECT_DIR/res/drawable/lucent_icon.png" "$DECODED/res/drawable/"
 cp "$THEME_ARCHIVE" "$ROOT_DIR/android-companion/assets/pegasus-lucent-version.txt" \
     "$DECODED/assets/"
+cp "$ROOT_DIR/LICENSE" "$DECODED/assets/LICENSE"
+cp "$ROOT_DIR/LICENSING.md" "$DECODED/assets/LICENSING.md"
+cp "$ROOT_DIR/SOURCE_OFFER.md" "$DECODED/assets/SOURCE_OFFER.md"
 cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$DECODED/assets/THIRD_PARTY_NOTICES.md"
+cp "$ROOT_DIR/theme/LICENSE" "$DECODED/assets/THEME_LICENSE"
 
 # Compile all Java services together. The QtApplication stub is compile-only;
 # the real superclass remains in Pegasus's primary classes.dex.
@@ -129,7 +133,7 @@ cp "$BUILD_DIR/dex/classes.dex" "$BUILD_DIR/work/classes2.dex"
 (cd "$BUILD_DIR/work" && "$BUILD_TOOLS/aapt" add "$UNSIGNED" classes2.dex >/dev/null)
 
 ALIGNED="$BUILD_DIR/lucent-unified-aligned.apk"
-OUTPUT="$BUILD_DIR/lucent-unified-$VERSION_NAME.apk"
+OUTPUT="$BUILD_DIR/lucent-$VERSION_NAME.apk"
 "$BUILD_TOOLS/zipalign" -f 4 "$UNSIGNED" "$ALIGNED"
 KEYSTORE=${LUCENT_KEYSTORE:-$ROOT_DIR/android-companion/debug.keystore}
 STORE_PASS=${LUCENT_STORE_PASS:-android}
