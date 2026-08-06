@@ -14,4 +14,4 @@ licensed under GPLv3. Lucent is a modified distribution and must be distributed
 with corresponding source and the GPLv3 license. Product logos and trademarks
 remain the property of their respective owners.
 
-Run `./build.sh` to create `build/lucent-unified-3.0.33.apk`.
+Run `./build.sh` to create `build/lucent-unified-3.0.36.apk`.

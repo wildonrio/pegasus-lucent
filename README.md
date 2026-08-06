@@ -2,15 +2,13 @@
 
 Lucent is a cinematic Pegasus Frontend theme and Android companion for handheld gaming devices. It supports conventional single-screen Android devices and dual-screen hardware such as the AYN Thor.
 
-## Downloads
+## Download
 
-- **Pegasus Lucent APK:** installs the companion dashboard, automation service, and bundled Lucent theme.
-- **Lucent Controller APK:** updates the direct-launch bridge and optional Thor stop-button service.
-- **Lucent theme ZIP:** installs the theme by itself for an existing Pegasus setup.
+Install the single **Lucent unified APK** from the [latest release](https://github.com/wildonrio/pegasus-lucent/releases/latest). It contains Pegasus Frontend, the Lucent theme, the importer and media services, direct-launch bridges, updater, and the optional Thor Stop-button service. No separate Pegasus, theme ZIP, controller APK, or companion APK is required.
 
-Use the assets attached to the [latest release](https://github.com/wildonrio/pegasus-lucent/releases/latest). The APK checks this repository when its service starts. Theme updates are applied inside Lucent; Android displays its normal confirmation screen before an APK update is installed.
+Lucent checks this repository at startup and can also check manually from Settings. When an update is available it asks before downloading and opens Android's standard installer confirmation; Android does not permit a normal third-party app to silently replace itself.
 
-## What the companion adds
+## What Lucent adds
 
 - Installs and selects the Lucent theme without touching ROM files.
 - Scans internal and removable-storage Downloads folders for newly downloaded games.
@@ -23,21 +21,18 @@ Use the assets attached to the [latest release](https://github.com/wildonrio/peg
 
 ## Installation
 
-1. Install [Pegasus Frontend](https://pegasus-frontend.org/) if it is not already installed.
-2. Install `pegasus-lucent.apk` from the latest release.
-3. On an AYN Thor, also install `pegasus-lucent-controller.apk`. In Android Accessibility settings, enable **Pegasus Lucent Controller** when prompted.
-4. Open **Pegasus Lucent** once and grant the storage and display permissions Android requests.
-5. Choose **Install / Repair Lucent Theme**, then open Pegasus. Lucent is installed under `pegasus-frontend/themes/lucent` and selected automatically.
+1. Download and install `lucent-unified-<version>.apk` from the latest release.
+2. Open Lucent and grant the storage permissions Android requests. The first library discovery runs automatically.
+3. On an AYN Thor, enable **Pegasus Lucent Controller** in Android Accessibility settings if you want the one-second Stop-button shortcut.
 
 On the Thor, a normal press of the square Stop/Select button is passed through unchanged as Select. Holding it continuously for one second closes the active game and restores Pegasus.
-
-The standalone ZIP contains a top-level `lucent` folder. Extract it into `pegasus-frontend/themes/` if you only want the theme.
 
 ## Source layout
 
 - `theme/` — Pegasus QML theme and artwork.
 - `android-companion/` — dependency-free Android companion, importer, preview service, media enrichment, and updater.
 - `android-launch-bridge/` — ROM intent bridge and the one-second hold-to-exit controller service.
+- `unified-android/` — reproducible build that combines Pegasus and every Lucent component into the release APK.
 - `release-manifest.json` — signed-artifact versions, stable release URLs, and SHA-256 checksums used by the updater.
 
 ## Privacy and safety

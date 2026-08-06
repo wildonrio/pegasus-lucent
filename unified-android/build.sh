@@ -11,8 +11,8 @@ ANDROID_JAR="$SDK_DIR/platforms/$ANDROID_PLATFORM/android.jar"
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}
 APKTOOL=${APKTOOL:-/opt/homebrew/bin/apktool}
 BUILD_DIR="$PROJECT_DIR/build"
-VERSION_NAME=3.0.33
-VERSION_CODE=63
+VERSION_NAME=3.0.36
+VERSION_CODE=66
 BASE_NAME=pegasus-fe_alpha16-105-g6b322063_android64.apk
 BASE_URL="https://raw.githubusercontent.com/mmatyas/pegasus-deploy-staging/continuous-android64/$BASE_NAME"
 BASE_SHA256=e595be198bfd21c1855eaf563d5af0deae9c9601e6efb195ed299f2065287c67
@@ -66,6 +66,7 @@ MANIFEST_COMPONENTS="$BUILD_DIR/work/manifest-components.xml"
 printf '%s\n' \
 '        <activity android:name="com.thorium.preview.PreviewActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" android:excludeFromRecents="true" android:launchMode="singleTop" android:resizeableActivity="true" android:screenOrientation="landscape" android:exported="true"/>' \
 '        <activity android:name="com.thorium.preview.RomLaunchActivity" android:excludeFromRecents="true" android:exported="true"/>' \
+'        <activity android:name="com.thorium.preview.BrowserActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" android:exported="false"/>' \
 '        <service android:name="com.thorium.preview.PreviewService" android:exported="true"/>' \
 '        <provider android:name="com.thorium.preview.UpdateFileProvider" android:authorities="com.thorium.preview.updates" android:exported="false" android:grantUriPermissions="true"/>' \
 '        <provider android:name="com.thorium.preview.RomFileProvider" android:authorities="com.thorium.preview.roms" android:exported="false" android:grantUriPermissions="true"/>' \
@@ -76,7 +77,7 @@ printf '%s\n' \
     > "$MANIFEST_COMPONENTS"
 COMPONENTS=$(sed 's/[&/]/\\&/g' "$MANIFEST_COMPONENTS" | tr '\n' ' ')
 perl -0pi -e "s#</application>#$COMPONENTS</application>#" "$DECODED/AndroidManifest.xml"
-perl -0pi -e 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/><uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><application#' \
+perl -0pi -e 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/><uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/><uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><application#' \
     "$DECODED/AndroidManifest.xml"
 
 mkdir -p "$DECODED/res/raw" "$DECODED/res/xml" "$DECODED/assets"
