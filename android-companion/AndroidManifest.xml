@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.thorium.preview"
-    android:versionCode="63"
-    android:versionName="3.0.33">
+    android:versionCode="66"
+    android:versionName="3.0.36">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -45,6 +45,11 @@
             android:name=".RomLaunchActivity"
             android:excludeFromRecents="true"
             android:exported="true" />
+
+        <activity
+            android:name=".BrowserActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:exported="false" />
 
         <service
             android:name=".PreviewService"

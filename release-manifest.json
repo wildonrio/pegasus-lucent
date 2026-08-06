@@ -1,7 +1,7 @@
 {
   "product": "Lucent",
-  "companionVersionCode": 63,
-  "companionVersionName": "3.0.33",
-  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.33/lucent-unified-3.0.33.apk",
-  "companionSha256": "1f41ac212875c23e32efdc29756f26f278f6b1d870db19a3f95ec134adfd4d5c"
+  "companionVersionCode": 66,
+  "companionVersionName": "3.0.36",
+  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.36/lucent-unified-3.0.36.apk",
+  "companionSha256": "5d49c13036b52ae3f2a4ceaa90e827347450007d79daa8281ac0cf0cf807bf94"
 }

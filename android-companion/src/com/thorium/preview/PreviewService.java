@@ -321,6 +321,18 @@ public final class PreviewService extends Service {
             } else if ("/import/scan".equals(path)) {
                 importManager.startScan();
                 respond(writer, "202 Accepted", importManager.statusJson());
+            } else if ("/maintenance/rescan".equals(path)) {
+                importManager.startManualScan();
+                updateManager.checkAsync(true);
+                respond(writer, "202 Accepted", importManager.statusJson());
+            } else if ("/browser/open".equals(path)) {
+                String requestedUrl = parseQuery(query).getOrDefault("url", "");
+                Intent browser = new Intent(this, BrowserActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        .putExtra(BrowserActivity.EXTRA_URL, requestedUrl);
+                startActivity(browser);
+                respond(writer, "202 Accepted", "{\"ok\":true}");
             } else if ("/import/initial".equals(path)) {
                 importManager.startInitialScan();
                 respond(writer, "202 Accepted", importManager.statusJson());

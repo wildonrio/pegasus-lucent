@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.33"
+    readonly property string lucentVersion: "3.0.36"
 
     property string page: "home"
     // 0 systems; 1 continue; 2 most played; 3 recently added;
@@ -128,6 +128,14 @@ FocusScope {
             return shelfDisplaySystemIndex
         return systemRail.currentIndex
     }
+    // All Systems represents the installed library, not whichever random game
+    // happens to be supplying its preview. Keep the installed-platform logo row
+    // visible while the system column owns focus; once a game is locked, the
+    // header can switch to that game's individual platform brand.
+    property bool showAvailableBrandRow: page === "home" &&
+            systemRail.currentIndex === 0 &&
+            ((homeViewMode === "covers" && homeZone === 0) ||
+             (homeViewMode === "list" && homeListFocusColumn === 0))
     // Keep the highlighted home system separate from the collection backing
     // gameSortModel. Rebinding that source on every home-screen arrow forced a
     // complete proxy-model rebuild and score sort for a list that was hidden.
@@ -1452,6 +1460,36 @@ FocusScope {
         requestImport("scan")
     }
 
+    function startMaintenanceRescan() {
+        endSearch()
+        updatePromptDismissed = false
+        importState = "scanning"
+        importProgress = 0.01
+        importMessage = "Starting full library maintenance…"
+        importDetail = "Checking storage, Downloads, game media, and Lucent updates"
+        importStatusInitialized = true
+        importToastVisible = true
+
+        var request = new XMLHttpRequest()
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE ||
+                    request.status < 200 || request.status >= 300)
+                return
+            try {
+                root.applyImportStatus(JSON.parse(request.responseText))
+            } catch (error) {
+                // The normal status poll will recover the visible state.
+            }
+        }
+        request.open("GET", "http://127.0.0.1:43821/maintenance/rescan", true)
+        request.send()
+    }
+
+    function openLucentBrowser() {
+        endSearch()
+        requestPreviewEndpoint("browser/open")
+    }
+
     function pollImportStatus() {
         requestImport("status")
     }
@@ -2714,7 +2752,15 @@ FocusScope {
 
     SortFilterProxyModel {
         id: systemGameSortModel
-        sourceModel: root.activeCollection ? root.activeCollection.games : null
+        // This proxy is only a startup fallback. Once the companion's native
+        // per-system indexes are ready, leaving it attached made every L2/R2
+        // move re-filter and re-sort the newly selected collection even
+        // though the visible rails were already using activeSystemGames.
+        // All Systems felt instant because it never triggered that hidden
+        // rebuild. Detach here so every physical system swaps the same kind of
+        // precomputed sorted index instead of doing duplicate work.
+        sourceModel: !root.libraryIndexReady && root.searchQuery === "" &&
+                     root.activeCollection ? root.activeCollection.games : null
         filters: [
             ExpressionFilter {
                 expression: root.gameVisibleAfterMutation(
@@ -3261,7 +3307,8 @@ FocusScope {
                 height: 64
                 property bool leftAnchoredMark:
                         root.brandSlugForSystem(root.displaySystemIndex) === "microsoft"
-                visible: root.brandSlugForSystem(root.displaySystemIndex) !== "" &&
+                visible: !root.showAvailableBrandRow &&
+                         root.brandSlugForSystem(root.displaySystemIndex) !== "" &&
                          root.displaySystemIndex > 0
 
                 Image {
@@ -3284,8 +3331,7 @@ FocusScope {
                 anchors.verticalCenter: parent.verticalCenter
                 height: 58
                 spacing: 22
-                visible: root.displaySystemIndex === 0 && root.page === "home" &&
-                         root.homeZone === 0
+                visible: root.showAvailableBrandRow
 
                 Repeater {
                     model: root.availableBrandSlugs
@@ -3480,6 +3526,69 @@ FocusScope {
                         root.settingsIndex = 0
                         root.forceActiveFocus()
                     }
+                }
+            }
+
+            Item {
+                id: lucentBrowserButton
+                anchors.right: lucentSettingsButton.left
+                anchors.rightMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                width: 42
+                height: 42
+
+                Image {
+                    anchors.centerIn: parent
+                    width: 31
+                    height: 31
+                    source: Qt.resolvedUrl("assets/globe-white.svg")
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    mipmap: true
+                    opacity: 0.96
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.openLucentBrowser()
+                }
+            }
+
+            Item {
+                id: lucentRescanButton
+                anchors.right: lucentBrowserButton.left
+                anchors.rightMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                width: 42
+                height: 42
+
+                Image {
+                    id: lucentRescanIcon
+                    anchors.centerIn: parent
+                    width: 31
+                    height: 31
+                    source: Qt.resolvedUrl("assets/rescan-white.svg")
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    mipmap: true
+                    opacity: root.importState !== "idle" &&
+                             root.importState !== "complete" &&
+                             root.importState !== "error" ? 0.62 : 0.96
+
+                    RotationAnimation on rotation {
+                        running: root.importState !== "idle" &&
+                                 root.importState !== "complete" &&
+                                 root.importState !== "error"
+                        from: 0
+                        to: 360
+                        loops: Animation.Infinite
+                        duration: 900
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.startMaintenanceRescan()
                 }
             }
 

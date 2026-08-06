@@ -128,7 +128,7 @@ final class ImportManager {
     }
 
     void startScan() {
-        startScan(false);
+        startScan(false, false);
     }
 
     void startInitialScan() {
@@ -143,13 +143,21 @@ final class ImportManager {
         // conservative full discovery on every fresh app/service launch; it
         // skips every ROM already referenced by existing Pegasus metadata, so
         // this remains incremental even for multi-thousand-game libraries.
-        startScan(true);
+        startScan(true, false);
     }
 
-    private void startScan(boolean fullDiscovery) {
+    /** User-requested maintenance pass. Unlike the background scan, this is a
+     * full storage discovery and is never suppressed by the fingerprint/time
+     * throttle. The running guard still prevents two destructive writers from
+     * touching the registry at the same time. */
+    void startManualScan() {
+        startScan(true, true);
+    }
+
+    private void startScan(boolean fullDiscovery, boolean force) {
         long now = SystemClock.elapsedRealtime();
         String fingerprint = downloadFingerprint();
-        if (running.get() || (now - lastScanStarted < RESCAN_THROTTLE_MS &&
+        if (running.get() || (!force && now - lastScanStarted < RESCAN_THROTTLE_MS &&
                 fingerprint.equals(lastDownloadFingerprint))) return;
         if (!running.compareAndSet(false, true)) return;
         lastScanStarted = now;
