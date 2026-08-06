@@ -1,7 +1,10 @@
 {
   "product": "Lucent",
-  "companionVersionCode": 69,
-  "companionVersionName": "3.0.39",
-  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.0.39/lucent-unified-3.0.39.apk",
-  "companionSha256": "d24e937261b29348c583c32dcf9aa0aad8375a0be4846a3b2cef70cbd3ab012b"
+  "themeVersion": "3.1.1",
+  "themeZipUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.1.1/pegasus-lucent-theme-3.1.1.zip",
+  "themeSha256": "ae527f516a8293761e644c7b43937217cb7f347ff2584577e2a7435fdfd4cfa9",
+  "companionVersionCode": 73,
+  "companionVersionName": "3.1.1",
+  "companionApkUrl": "https://github.com/wildonrio/pegasus-lucent/releases/download/v3.1.1/lucent-unified-3.1.1.apk",
+  "companionSha256": "a03add921b953fa56f3070fb5f378d7842c043a32971e0bd850636f3ddd38649"
 }

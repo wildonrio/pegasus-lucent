@@ -90,14 +90,16 @@ final class ThemeInstaller {
         if (!hasStorageAccess(context)) return;
         migratePegasusConfig();
         String bundled = readAssetText(context, ASSET_VERSION).trim();
+        boolean firstLucentInstall = !VERSION.isFile();
         if (!bundled.isEmpty() && (force || !bundled.equals(readText(VERSION).trim()))) {
             try (InputStream input = context.getAssets().open(ASSET_ZIP)) {
                 installZip(input, bundled);
             }
         }
-        // Enforce the ROM-only provider configuration on every launch, even
-        // when the theme is current, so Android applications never reappear.
-        selectTheme();
+        // Lucent is the default, not a lock-in. Select it on first setup, but
+        // preserve any other Pegasus theme the user chooses afterward. The
+        // ROM-only provider rule remains enforced on every launch.
+        updatePegasusSettings(firstLucentInstall);
     }
 
     /**
@@ -167,24 +169,22 @@ final class ThemeInstaller {
             deleteTree(staging);
         }
         writeText(VERSION, version == null ? "unknown" : version.trim());
-        selectTheme();
     }
 
     static String installedVersion() {
         return readText(VERSION).trim();
     }
 
-    private static void selectTheme() throws Exception {
+    private static void updatePegasusSettings(boolean selectLucent) throws Exception {
         // Modern Pegasus Android builds keep runtime settings under their
-        // app-specific external directory. Update that real config as well as
-        // the legacy shared path, and disable the Android Apps provider: Lucent
-        // is deliberately a ROM library, never an application launcher.
-        updateSettings(new File(PEGASUS_CONFIG, "settings.txt"));
-        updateSettings(new File(LUCENT_CONFIG, "settings.txt"));
-        updateSettings(new File(PEGASUS, "settings.txt"));
+        // app-specific external directory. Disable the Android Apps provider:
+        // Lucent is deliberately a ROM library, never an application launcher.
+        updateSettings(new File(PEGASUS_CONFIG, "settings.txt"), selectLucent);
+        updateSettings(new File(LUCENT_CONFIG, "settings.txt"), selectLucent);
+        updateSettings(new File(PEGASUS, "settings.txt"), selectLucent);
     }
 
-    private static void updateSettings(File settings) throws Exception {
+    private static void updateSettings(File settings, boolean selectLucent) throws Exception {
         List<String> lines = new ArrayList<>();
         boolean themeReplaced = false;
         boolean appsReplaced = false;
@@ -193,10 +193,10 @@ final class ThemeInstaller {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.startsWith("general.theme:")) {
-                        if (!themeReplaced) {
+                        if (selectLucent && !themeReplaced) {
                             lines.add("general.theme: " + THEME.getAbsolutePath() + "/");
                             themeReplaced = true;
-                        }
+                        } else if (!selectLucent) lines.add(line);
                     } else if (line.startsWith("providers.androidapps.enabled:")) {
                         if (!appsReplaced) {
                             lines.add("providers.androidapps.enabled: false");
@@ -206,7 +206,8 @@ final class ThemeInstaller {
                 }
             }
         }
-        if (!themeReplaced) lines.add(0, "general.theme: " + THEME.getAbsolutePath() + "/");
+        if (selectLucent && !themeReplaced)
+            lines.add(0, "general.theme: " + THEME.getAbsolutePath() + "/");
         if (!appsReplaced) lines.add("providers.androidapps.enabled: false");
         File parent = settings.getParentFile();
         if (parent != null) parent.mkdirs();

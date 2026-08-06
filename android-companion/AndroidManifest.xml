@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.thorium.preview"
-    android:versionCode="69"
-    android:versionName="3.0.39">
+    android:versionCode="73"
+    android:versionName="3.1.1">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -19,7 +19,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="Pegasus Lucent"
+        android:label="Lucent"
         android:theme="@style/AppTheme">
 
         <activity
@@ -39,6 +39,7 @@
             android:launchMode="singleTop"
             android:resizeableActivity="true"
             android:screenOrientation="landscape"
+            android:taskAffinity="com.thorium.preview.preview"
             android:exported="true" />
 
         <activity

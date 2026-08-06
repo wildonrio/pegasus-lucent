@@ -125,7 +125,7 @@ final class UpdateManager {
         boolean appNew = remoteCode > currentCode;
 
         if (themeNew) {
-            setStatus("theme", 0.18, "Downloading the latest Pegasus Lucent theme…",
+            setStatus("theme", 0.18, "Downloading the latest Lucent theme…",
                     appNew, false);
             File theme = new File(context.getCacheDir(), "pegasus-lucent-theme.zip");
             download(manifest.optString("themeZipUrl"), theme, MAX_THEME,
@@ -143,7 +143,7 @@ final class UpdateManager {
                     "Software update ready — choose Install or Later in Lucent", true, true);
         } else {
             String message = themeNew ? "Theme updated successfully" :
-                    (userInitiated ? "Pegasus Lucent is up to date" : "Updates checked");
+                    (userInitiated ? "Lucent is up to date" : "Updates checked");
             setStatus("complete", 1, message, false, false);
         }
     }

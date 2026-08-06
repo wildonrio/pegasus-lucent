@@ -35,6 +35,8 @@ public final class StopButtonService extends AccessibilityService {
     private String upperPackage = PEGASUS_PACKAGE;
     private long lastStopAt;
     private boolean stopHeld;
+    private boolean holdActionTriggered;
+    private String pressedContentPackage = "";
     private long stopGeneration;
 
     @Override
@@ -57,7 +59,12 @@ public final class StopButtonService extends AccessibilityService {
             return;
 
         String packageName = event.getPackageName().toString();
-        if (!packageName.equals(getPackageName())
+        if (packageName.equals(PEGASUS_PACKAGE)) {
+            // In the unified build Lucent and the accessibility service share
+            // a package. Display 0 is still unambiguous because the preview
+            // activity lives on the lower display and was filtered above.
+            upperPackage = PEGASUS_PACKAGE;
+        } else if (!packageName.equals(getPackageName())
                 && !packageName.equals("com.android.systemui")
                 && !packageName.equals(PREVIEW_PACKAGE)) {
             upperPackage = packageName;
@@ -73,10 +80,19 @@ public final class StopButtonService extends AccessibilityService {
             return false;
 
         if (event.getAction() == KeyEvent.ACTION_UP) {
+            boolean wasHeldAction = holdActionTriggered;
+            String contentPackage = pressedContentPackage;
             stopHeld = false;
+            holdActionTriggered = false;
+            pressedContentPackage = "";
             ++stopGeneration;
-            // A short press is always the ordinary Select button. Returning
-            // false preserves both halves of the original hardware event.
+            if (!PEGASUS_PACKAGE.equals(upperPackage)) {
+                // A quick press is a global Lucent launcher. A completed hold
+                // already performed the same return at the one-second mark.
+                if (!wasHeldAction) returnToPegasus(contentPackage);
+                return true;
+            }
+            // Inside Lucent itself the physical button remains Select.
             return false;
         }
         if (event.getAction() != KeyEvent.ACTION_DOWN)
@@ -86,7 +102,7 @@ public final class StopButtonService extends AccessibilityService {
         // repeat delay. They must remain visible to the emulator, but must not
         // restart the one-second hold timer.
         if (event.getRepeatCount() != 0)
-            return false;
+            return !PEGASUS_PACKAGE.equals(upperPackage);
 
         // Window-change events on some Thor firmware builds omit their display
         // id. Resolve the active upper-screen package again at the exact key
@@ -94,7 +110,9 @@ public final class StopButtonService extends AccessibilityService {
         AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
         if (activeRoot != null && activeRoot.getPackageName() != null) {
             String activePackage = activeRoot.getPackageName().toString();
-            if (!activePackage.equals(getPackageName())
+            if (activePackage.equals(PEGASUS_PACKAGE)) {
+                upperPackage = PEGASUS_PACKAGE;
+            } else if (!activePackage.equals(getPackageName())
                     && !activePackage.equals("com.android.systemui")
                     && !activePackage.equals(PREVIEW_PACKAGE)) {
                 upperPackage = activePackage;
@@ -106,6 +124,8 @@ public final class StopButtonService extends AccessibilityService {
             return false;
         final String contentPackage = upperPackage;
         stopHeld = true;
+        holdActionTriggered = false;
+        pressedContentPackage = contentPackage;
         final long generation = ++stopGeneration;
         handler.postDelayed(new Runnable() {
             @Override
@@ -117,6 +137,7 @@ public final class StopButtonService extends AccessibilityService {
                     return;
                 lastStopAt = now;
                 stopHeld = false;
+                holdActionTriggered = true;
                 ++stopGeneration;
                 // Background the live emulation task instead of terminating
                 // it. Android delivers onPause/onStop so emulators can flush
@@ -127,9 +148,10 @@ public final class StopButtonService extends AccessibilityService {
                 returnToPegasus(contentPackage);
             }
         }, HOLD_TO_EXIT_MS);
-        // Never consume the original key. A tap continues to be Select in
-        // every frontend and emulator; only the timer adds the hold action.
-        return false;
+        // Outside Lucent consume both halves so a short global-launch press
+        // cannot also trigger an emulator's Select action. Inside Lucent the
+        // early return above keeps the button's native Select behavior.
+        return true;
     }
 
     private void exitDolphinAndReturn() {
@@ -250,6 +272,8 @@ public final class StopButtonService extends AccessibilityService {
     @Override
     public void onInterrupt() {
         stopHeld = false;
+        holdActionTriggered = false;
+        pressedContentPackage = "";
         ++stopGeneration;
         // No spoken or haptic feedback channel is used.
     }
