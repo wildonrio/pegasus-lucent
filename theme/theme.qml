@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.36"
+    readonly property string lucentVersion: "3.0.37"
 
     property string page: "home"
     // 0 systems; 1 continue; 2 most played; 3 recently added;
@@ -37,6 +37,7 @@ FocusScope {
     property int settingsIndex: 0
     property bool liquidGlassEnabled: false
     property bool systemLedEnabled: true
+    property int systemLedBrightness: 35
     property bool searchOpen: false
     property string searchQuery: ""
     property bool searchKeyboardAccepting: false
@@ -1232,7 +1233,9 @@ FocusScope {
 
     function applySystemLedColor() {
         if (!systemLedEnabled) return
-        requestPreviewEndpoint("led?enabled=1&brightness=180&color=" + selectedLedColor())
+        var hardwareBrightness = Math.round(255 * systemLedBrightness / 100)
+        requestPreviewEndpoint("led?enabled=1&brightness=" + hardwareBrightness +
+                "&color=" + selectedLedColor())
     }
 
     function setSystemLedEnabled(enabled) {
@@ -1242,6 +1245,14 @@ FocusScope {
             systemLedCommit.restart()
         else
             requestPreviewEndpoint("led?enabled=0")
+    }
+
+    function setSystemLedBrightness(value) {
+        var clamped = Math.max(5, Math.min(100, Number(value)))
+        systemLedBrightness = Math.round(clamped / 5) * 5
+        api.memory.set("lucentSystemLedBrightness", systemLedBrightness)
+        if (systemLedEnabled)
+            systemLedCommit.restart()
     }
 
     function activateSetting(direction) {
@@ -1257,7 +1268,10 @@ FocusScope {
             liquidGlassEnabled = !liquidGlassEnabled
             api.memory.set("thoriumLiquidGlassEnabled", liquidGlassEnabled)
         } else if (settingsIndex === 4) {
-            setSystemLedEnabled(!systemLedEnabled)
+            if (direction === 0)
+                setSystemLedEnabled(!systemLedEnabled)
+            else
+                setSystemLedBrightness(systemLedBrightness + direction * 5)
         } else {
             updatePromptDismissed = false
             importState = "idle"
@@ -1991,6 +2005,9 @@ FocusScope {
                 Boolean(api.memory.get("thoriumLiquidGlassEnabled")) : false
         systemLedEnabled = api.memory.has("lucentSystemLedEnabled") ?
                 Boolean(api.memory.get("lucentSystemLedEnabled")) : true
+        systemLedBrightness = api.memory.has("lucentSystemLedBrightness") ?
+                Math.max(5, Math.min(100,
+                    Number(api.memory.get("lucentSystemLedBrightness")))) : 35
         // Sound is on by default.  Migrate existing installs once because the
         // original theme persisted OFF even though the requested default is ON.
         if (!api.memory.has("parallaxPreviewSoundDefaultV1")) {
@@ -5569,23 +5586,88 @@ FocusScope {
                 Text {
                     x: 28
                     y: 60
-                    text: "AYN Thor/Odin joystick rings follow the highlighted system color"
+                    text: "Left / right adjusts brightness; A toggles the system-matched color"
                     color: "#9da7b8"
                     font.family: global.fonts.sans
                     font.pixelSize: 16
                 }
-                Text {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 28
+
+                Rectangle {
+                    anchors.right: ledBrightnessValue.left
+                    anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.systemLedEnabled ? "ON" : "OFF"
+                    width: 48
+                    height: 48
+                    color: "#221f2a38"
+                    border.width: 1
+                    border.color: "#45ffffff"
+                    radius: 24
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "−"
+                        color: "white"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 27
+                        font.weight: Font.Bold
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.settingsIndex = 4
+                            root.setSystemLedBrightness(root.systemLedBrightness - 5)
+                        }
+                    }
+                }
+
+                Text {
+                    id: ledBrightnessValue
+                    anchors.right: ledBrightnessPlus.left
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 124
+                    horizontalAlignment: Text.AlignHCenter
+                    text: (root.systemLedEnabled ? "ON  " : "OFF  ") +
+                          root.systemLedBrightness + "%"
                     color: root.accent
                     font.family: global.fonts.condensed
-                    font.pixelSize: 30
+                    font.pixelSize: 27
                     font.weight: Font.Bold
                 }
+
+                Rectangle {
+                    id: ledBrightnessPlus
+                    anchors.right: parent.right
+                    anchors.rightMargin: 24
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 48
+                    height: 48
+                    color: "#221f2a38"
+                    border.width: 1
+                    border.color: "#45ffffff"
+                    radius: 24
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "+"
+                        color: "white"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 27
+                        font.weight: Font.Bold
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.settingsIndex = 4
+                            root.setSystemLedBrightness(root.systemLedBrightness + 5)
+                        }
+                    }
+                }
                 MouseArea {
-                    anchors.fill: parent
+                    x: 0
+                    y: 0
+                    width: parent.width - 270
+                    height: parent.height
                     onClicked: { root.settingsIndex = 4; root.activateSetting(0) }
                 }
             }
