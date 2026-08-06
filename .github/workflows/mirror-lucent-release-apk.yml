@@ -1,0 +1,28 @@
+name: Mirror Lucent release APK
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  mirror-apk:
+    if: github.event.release.tag_name == 'v3.0.33'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the exact signed APK
+        run: |
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output lucent-unified-3.0.33.apk \
+            https://github.com/tyler-bam-ai/pegasus-lucent/releases/download/v3.0.33/lucent-unified-3.0.33.apk
+
+      - name: Verify the signed build
+        run: |
+          echo "1f41ac212875c23e32efdc29756f26f278f6b1d870db19a3f95ec134adfd4d5c  lucent-unified-3.0.33.apk" | sha256sum --check
+
+      - name: Attach APK to this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" lucent-unified-3.0.33.apk --clobber
