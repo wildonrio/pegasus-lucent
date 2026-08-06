@@ -9,7 +9,7 @@ FocusScope {
     width: 1920
     height: 1080
 
-    readonly property string lucentVersion: "3.0.39"
+    readonly property string lucentVersion: "3.1.1"
 
     property string page: "home"
     // 0 systems; 1 continue; 2 most played; 3 recently added;
@@ -36,9 +36,24 @@ FocusScope {
     property bool settingsOpen: false
     property int settingsIndex: 0
     property bool liquidGlassEnabled: false
+    // Platform family means the hardware brand (Nintendo, PlayStation, Sega,
+    // Xbox/Microsoft, Atari, and so on).  It is more precise than the generic
+    // word "company" and remains useful when many studios published games for
+    // the same console.
+    property string accentGrouping: "family" // family, system
+    property var customFamilyAccents: ({})
+    property var customSystemAccents: ({})
+    property bool accentEditorOpen: false
+    property int accentEditorTargetIndex: 0
+    property int accentEditorChannel: 0 // target, hue, saturation, lightness
+    property real accentEditorHue: 0
+    property real accentEditorSaturation: 0.78
+    property real accentEditorLightness: 0.58
     property bool systemLedEnabled: true
-    property bool systemLedUseDeviceBrightness: true
-    property int systemLedBrightness: 10
+    property int systemLedBrightness: 2
+    // Read only by the hidden pre-3.0.40 settings markup retained below.
+    property bool systemLedUseDeviceBrightness: false
+    property string startViewPreference: "cover"
     property bool searchOpen: false
     property string searchQuery: ""
     property bool searchKeyboardAccepting: false
@@ -79,6 +94,7 @@ FocusScope {
     property var pendingLibraryGameMap: ({})
     property int libraryIndexBuildPosition: 0
     property bool updatePromptOpen: false
+    property bool aboutOpen: false
     property int updatePromptChoice: 0
     property bool updatePromptDismissed: false
     property string updateStatusMessage: ""
@@ -177,6 +193,11 @@ FocusScope {
     }
     property string clockText: ""
 
+    readonly property bool homeListBrowsingSystems: page === "home" &&
+            homeViewMode === "list" && homeListFocusColumn === 0
+    readonly property string currentViewName: page === "games" ? "SYSTEM VIEW" :
+            (homeViewMode === "list" ? "LIST VIEW" : "COVER VIEW")
+
     /*
      * Qt 5 has no native Liquid Glass material, so reproduce the optical
      * behavior in one GPU pass. The rounded-rectangle SDF identifies the
@@ -254,17 +275,8 @@ FocusScope {
         "}\n"
 
     function brandSlugForSystem(index) {
-        var folder = systemModel.get(index).folder
-        if (folder === "all") return ""
-        if (folder === "arcade") return "arcade"
-        if (folder === "megadrive" || folder === "dreamcast" || folder === "gamegear")
-            return "sega"
-        if (folder === "psx" || folder === "ps2" || folder === "ps3" ||
-                folder === "psp" || folder === "psvita")
-            return "sony"
-        if (folder === "windows") return "microsoft"
-        if (folder === "pcenginecd") return ""
-        return "nintendo"
+        if (index < 0 || index >= systemModel.count) return ""
+        return String(systemModel.get(index).family || "")
     }
 
     function brandNameForSystem(index) {
@@ -274,6 +286,18 @@ FocusScope {
         if (brand === "microsoft") return "MICROSOFT"
         if (brand === "nintendo") return "NINTENDO"
         if (brand === "arcade") return "ARCADE"
+        if (brand === "atari") return "ATARI"
+        if (brand === "commodore") return "COMMODORE"
+        if (brand === "snk") return "SNK"
+        if (brand === "nec") return "NEC"
+        if (brand === "bandai") return "BANDAI"
+        if (brand === "mattel") return "MATTEL"
+        if (brand === "magnavox") return "MAGNAVOX"
+        if (brand === "coleco") return "COLECO"
+        if (brand === "apple") return "APPLE"
+        if (brand === "amstrad") return "AMSTRAD"
+        if (brand === "sinclair") return "SINCLAIR"
+        if (brand === "3do") return "3DO"
         return "MULTI-PUBLISHER"
     }
 
@@ -282,6 +306,176 @@ FocusScope {
         if (brand === "arcade")
             return Qt.resolvedUrl("assets/logos-png/arcade.png")
         return brand ? Qt.resolvedUrl("assets/brands/" + brand + ".png") : ""
+    }
+
+    function defaultFamilyAccent(family) {
+        // Spread unrelated platform families around the color wheel while
+        // retaining Lucent's established colors for the four families on the
+        // reference Thor library.
+        var defaults = {
+            "nintendo": "#ff9f43", "sega": "#4fd17f",
+            "sony": "#a987ff", "microsoft": "#4aa3ff",
+            "arcade": "#35d0e6", "atari": "#ff5964",
+            "commodore": "#23c9b8", "snk": "#ffd166",
+            "nec": "#ef6cff", "bandai": "#ff7d3a",
+            "mattel": "#48cae4", "magnavox": "#c7f464",
+            "coleco": "#f72585", "apple": "#a8b2c1",
+            "amstrad": "#00b4d8", "sinclair": "#e63946",
+            "3do": "#b8f2e6", "open": "#7bdff2"
+        }
+        return defaults[String(family)] || "#dce4f2"
+    }
+
+    function defaultSystemAccent(index) {
+        if (index <= 0 || systemModel.count <= 1) return "#dce4f2"
+        // Evenly spaced HSL hues make seven installed systems resolve to a
+        // ROYGBIV-like spectrum, while any other count still uses the full
+        // wheel instead of clustering near one color family.
+        var count = Math.max(1, systemModel.count - 1)
+        var hue = ((index - 1) % count) / count
+        return Qt.hsla(hue, 0.82, 0.59, 1.0)
+    }
+
+    function resolvedAccentForSystem(index) {
+        if (index <= 0) return "#dce4f2"
+        var system = systemModel.get(index)
+        if (accentGrouping === "system") {
+            var systemKey = String(system.folder)
+            return customSystemAccents[systemKey] || defaultSystemAccent(index)
+        }
+        var familyKey = String(system.family || "open")
+        return customFamilyAccents[familyKey] || defaultFamilyAccent(familyKey)
+    }
+
+    function applyAccentPalette() {
+        for (var index = 0; index < systemModel.count; ++index)
+            systemModel.setProperty(index, "accent", resolvedAccentForSystem(index))
+        if (systemLedEnabled) systemLedCommit.restart()
+    }
+
+    function setAccentGrouping(value) {
+        accentGrouping = value === "system" ? "system" : "family"
+        api.memory.set("lucentAccentGrouping", accentGrouping)
+        accentEditorTargetIndex = 0
+        applyAccentPalette()
+    }
+
+    function accentTargets() {
+        var targets = []
+        var seen = ({})
+        for (var index = 1; index < systemModel.count; ++index) {
+            var value = accentGrouping === "system" ?
+                    String(systemModel.get(index).folder) :
+                    String(systemModel.get(index).family || "open")
+            if (seen[value]) continue
+            seen[value] = true
+            targets.push(value)
+        }
+        return targets
+    }
+
+    function accentTargetLabel(key) {
+        if (accentGrouping === "family") {
+            for (var index = 1; index < systemModel.count; ++index) {
+                if (String(systemModel.get(index).family || "open") === key)
+                    return brandNameForSystem(index)
+            }
+            return String(key).toUpperCase()
+        }
+        for (var systemIndex = 1; systemIndex < systemModel.count; ++systemIndex) {
+            if (String(systemModel.get(systemIndex).folder) === key)
+                return String(systemModel.get(systemIndex).name)
+        }
+        return String(key).toUpperCase()
+    }
+
+    function accentEditorColor() {
+        return Qt.hsla(accentEditorHue, accentEditorSaturation,
+                accentEditorLightness, 1.0)
+    }
+
+    function loadAccentEditorTarget() {
+        var targets = accentTargets()
+        if (targets.length === 0) return
+        accentEditorTargetIndex = Math.max(0,
+                Math.min(targets.length - 1, accentEditorTargetIndex))
+        var key = targets[accentEditorTargetIndex]
+        var saved = accentGrouping === "system" ?
+                customSystemAccents[key] : customFamilyAccents[key]
+        var rawColor = saved || (accentGrouping === "system" ?
+                resolvedAccentForSystem(accentEditorTargetIndex + 1) :
+                defaultFamilyAccent(key))
+        var color = Qt.tint(rawColor, "#00000000")
+        accentEditorHue = color.hslHue < 0 ? 0 : color.hslHue
+        accentEditorSaturation = color.hslSaturation
+        accentEditorLightness = color.hslLightness
+    }
+
+    function openAccentEditor() {
+        accentEditorTargetIndex = 0
+        accentEditorChannel = 0
+        loadAccentEditorTarget()
+        accentEditorOpen = true
+    }
+
+    function storeAccentEditorColor() {
+        var targets = accentTargets()
+        if (targets.length === 0) return
+        var key = targets[accentEditorTargetIndex]
+        var hex = "#" + colorByteHex(accentEditorColor().r) +
+                colorByteHex(accentEditorColor().g) +
+                colorByteHex(accentEditorColor().b)
+        if (accentGrouping === "system") {
+            var systemCopy = JSON.parse(JSON.stringify(customSystemAccents))
+            systemCopy[key] = hex
+            customSystemAccents = systemCopy
+            api.memory.set("lucentCustomSystemAccents", JSON.stringify(systemCopy))
+        } else {
+            var familyCopy = JSON.parse(JSON.stringify(customFamilyAccents))
+            familyCopy[key] = hex
+            customFamilyAccents = familyCopy
+            api.memory.set("lucentCustomFamilyAccents", JSON.stringify(familyCopy))
+        }
+        applyAccentPalette()
+    }
+
+    function adjustAccentEditor(direction) {
+        var targets = accentTargets()
+        if (targets.length === 0) return
+        if (accentEditorChannel === 0) {
+            accentEditorTargetIndex = (accentEditorTargetIndex +
+                    (direction < 0 ? -1 : 1) + targets.length) % targets.length
+            loadAccentEditorTarget()
+            return
+        }
+        if (accentEditorChannel === 1)
+            accentEditorHue = (accentEditorHue + (direction < 0 ? -1 : 1) / 72 + 1) % 1
+        else if (accentEditorChannel === 2)
+            accentEditorSaturation = Math.max(0, Math.min(1,
+                    accentEditorSaturation + (direction < 0 ? -0.02 : 0.02)))
+        else
+            accentEditorLightness = Math.max(0.18, Math.min(0.82,
+                    accentEditorLightness + (direction < 0 ? -0.02 : 0.02)))
+        storeAccentEditorColor()
+    }
+
+    function resetAccentEditorColor() {
+        var targets = accentTargets()
+        if (targets.length === 0) return
+        var key = targets[accentEditorTargetIndex]
+        if (accentGrouping === "system") {
+            var systemCopy = JSON.parse(JSON.stringify(customSystemAccents))
+            delete systemCopy[key]
+            customSystemAccents = systemCopy
+            api.memory.set("lucentCustomSystemAccents", JSON.stringify(systemCopy))
+        } else {
+            var familyCopy = JSON.parse(JSON.stringify(customFamilyAccents))
+            delete familyCopy[key]
+            customFamilyAccents = familyCopy
+            api.memory.set("lucentCustomFamilyAccents", JSON.stringify(familyCopy))
+        }
+        applyAccentPalette()
+        loadAccentEditorTarget()
     }
 
     function hardwareVariants(folder) {
@@ -353,9 +547,11 @@ FocusScope {
                 "mark": definition.mark,
                 "collectionName": definition.collectionName,
                 "folder": definition.folder,
+                "family": definition.family,
                 "accent": definition.accent
             })
         }
+        applyAccentPalette()
         refreshAvailableBrands()
         Qt.callLater(function() { root.loadLibraryIndex() })
     }
@@ -1236,7 +1432,7 @@ FocusScope {
         if (!systemLedEnabled) return
         var hardwareBrightness = Math.round(255 * systemLedBrightness / 100)
         requestPreviewEndpoint("led?enabled=1&brightness=" +
-                (systemLedUseDeviceBrightness ? "system" : hardwareBrightness) +
+                hardwareBrightness +
                 "&color=" + selectedLedColor())
     }
 
@@ -1252,19 +1448,138 @@ FocusScope {
     function setSystemLedBrightness(value) {
         var clamped = Math.max(1, Math.min(100, Number(value)))
         systemLedBrightness = Math.round(clamped)
-        systemLedUseDeviceBrightness = false
         api.memory.set("lucentSystemLedBrightness", systemLedBrightness)
-        api.memory.set("lucentSystemLedUseDeviceBrightness", false)
         if (systemLedEnabled)
             systemLedCommit.restart()
     }
 
     function setSystemLedUseDeviceBrightness(enabled) {
-        systemLedUseDeviceBrightness = Boolean(enabled)
-        api.memory.set("lucentSystemLedUseDeviceBrightness",
-                       systemLedUseDeviceBrightness)
-        if (systemLedEnabled)
-            systemLedCommit.restart()
+        // Compatibility target for the inert legacy row. The active UI always
+        // uses the explicit one-percent-through-100-percent control.
+        systemLedUseDeviceBrightness = false
+        if (enabled) setSystemLedBrightness(1)
+    }
+
+    function startViewOptions() {
+        var options = ["cover", "list", "all"]
+        for (var index = 1; index < systemModel.count; ++index)
+            options.push("system:" + String(systemModel.get(index).folder))
+        return options
+    }
+
+    function startViewLabel(value) {
+        if (value === "cover") return "COVER VIEW"
+        if (value === "list") return "LIST VIEW"
+        if (value === "all") return "ALL SYSTEMS VIEW"
+        if (String(value).indexOf("system:") === 0) {
+            var folder = String(value).substring(7)
+            for (var index = 1; index < systemModel.count; ++index) {
+                if (String(systemModel.get(index).folder) === folder)
+                    return String(systemModel.get(index).name) + " VIEW"
+            }
+        }
+        return "COVER VIEW"
+    }
+
+    function cycleStartView(direction) {
+        var options = startViewOptions()
+        var current = options.indexOf(startViewPreference)
+        if (current < 0) current = 0
+        var step = direction < 0 ? -1 : 1
+        startViewPreference = options[(current + step + options.length) % options.length]
+        api.memory.set("lucentStartView", startViewPreference)
+    }
+
+    function configuredStartSystemIndex() {
+        if (String(startViewPreference).indexOf("system:") !== 0) return 0
+        var folder = String(startViewPreference).substring(7)
+        for (var index = 1; index < systemModel.count; ++index) {
+            if (String(systemModel.get(index).folder) === folder) return index
+        }
+        return 0
+    }
+
+    function applyConfiguredStartView() {
+        if (startViewPreference === "list") {
+            page = "home"
+            homeViewMode = "list"
+            homeZone = 1
+            homeListCategory = 1
+            homeListFocusColumn = 0
+            systemRail.currentIndex = 0
+            return
+        }
+        if (startViewPreference === "all" ||
+                String(startViewPreference).indexOf("system:") === 0) {
+            activeSystemIndex = configuredStartSystemIndex()
+            allSystemsActive = activeSystemIndex === 0
+            activeCollection = allSystemsActive ? null : collectionAtSystem(activeSystemIndex)
+            systemRail.currentIndex = activeSystemIndex
+            activateCachedSystemSort()
+            page = "games"
+            gameRail.currentIndex = 0
+            return
+        }
+        page = "home"
+        homeViewMode = "covers"
+        homeZone = 0
+    }
+
+    function homeSystemStatsText() {
+        var index = Math.max(0, systemRail.currentIndex)
+        if (index === 0)
+            return romGameCount() + " TITLES  •  " + Math.max(0, systemModel.count - 1) +
+                    " SYSTEMS  •  ONE UNIFIED LIBRARY"
+        return systemGameCount(index) + " TITLES  •  " +
+                String(systemModel.get(index).years) + "  •  DIRECT LAUNCH READY"
+    }
+
+    function homeSystemInstructionText() {
+        if (homeListFocusColumn === 0)
+            return homeShelfName(homeListCategory) +
+                    "  •  RANDOM PREVIEW  •  A  SELECT SYSTEM"
+        return homeShelfName(homeListCategory) +
+                "  •  A  PLAY  •  B  BACK TO SYSTEM LIST"
+    }
+
+    function settingTitle(index) {
+        var titles = ["SYSTEM WALLPAPER MODE", "GAME PREVIEW PLACEMENT",
+                "PREVIEW VIDEO SOUND", "LIQUID GLASS",
+                "ACCENT COLOR GROUPING", "CUSTOMIZE ACCENT COLORS",
+                "SYSTEM-MATCHED STICK LEDS", "STICK LED BRIGHTNESS",
+                "START VIEW", "ABOUT LUCENT", "UPDATE LIBRARY & LUCENT"]
+        return titles[index]
+    }
+
+    function settingDescription(index) {
+        var descriptions = [
+            "Preloaded static angle; rerolls only after you leave",
+            "Automatic detects the screen count; choose PIP or Off manually",
+            "Sound follows the visible preview; preloaded neighbors stay silent",
+            "Optional refractive blur and wallpaper distortion for controls",
+            "Group accents by platform family or give every system its own hue",
+            "Choose any hue, saturation, and lightness for each active group",
+            "Instantly matches the accent of the highlighted system",
+            "Manual hardware level from 1–100%; defaults to a subtle 2%",
+            "Choose the layout or detected system shown on a fresh launch",
+            "Pegasus attribution, licenses, trademarks, and Lucent version",
+            "Scan games and check GitHub for app and theme updates"
+        ]
+        return descriptions[index]
+    }
+
+    function settingValue(index) {
+        if (index === 0) return "STATIC"
+        if (index === 1) return previewPlacementLabel()
+        if (index === 2) return previewSoundEnabled ? "ON" : "OFF"
+        if (index === 3) return liquidGlassEnabled ? "ON" : "OFF"
+        if (index === 4) return accentGrouping === "system" ? "BY SYSTEM" : "BY PLATFORM FAMILY"
+        if (index === 5) return "EDIT"
+        if (index === 6) return systemLedEnabled ? "ON" : "OFF"
+        if (index === 7) return systemLedBrightness + "%"
+        if (index === 8) return startViewLabel(startViewPreference)
+        if (index === 9) return "VIEW"
+        return "RUN"
     }
 
     function activateSetting(direction) {
@@ -1280,13 +1595,17 @@ FocusScope {
             liquidGlassEnabled = !liquidGlassEnabled
             api.memory.set("thoriumLiquidGlassEnabled", liquidGlassEnabled)
         } else if (settingsIndex === 4) {
-            if (direction === 0)
-                setSystemLedEnabled(!systemLedEnabled)
-            else {
-                var base = systemLedUseDeviceBrightness ?
-                           (direction < 0 ? 2 : 9) : systemLedBrightness
-                setSystemLedBrightness(base + direction)
-            }
+            setAccentGrouping(accentGrouping === "family" ? "system" : "family")
+        } else if (settingsIndex === 5) {
+            openAccentEditor()
+        } else if (settingsIndex === 6) {
+            setSystemLedEnabled(!systemLedEnabled)
+        } else if (settingsIndex === 7) {
+            setSystemLedBrightness(systemLedBrightness + (direction < 0 ? -1 : 1))
+        } else if (settingsIndex === 8) {
+            cycleStartView(direction === 0 ? 1 : direction)
+        } else if (settingsIndex === 9) {
+            aboutOpen = true
         } else {
             updatePromptDismissed = false
             importState = "idle"
@@ -2018,23 +2337,44 @@ FocusScope {
         // preference, but the calm, undistorted surface is the default.
         liquidGlassEnabled = api.memory.has("thoriumLiquidGlassEnabled") ?
                 Boolean(api.memory.get("thoriumLiquidGlassEnabled")) : false
+        accentGrouping = api.memory.has("lucentAccentGrouping") ?
+                String(api.memory.get("lucentAccentGrouping")) : "family"
+        try {
+            customFamilyAccents = api.memory.has("lucentCustomFamilyAccents") ?
+                    JSON.parse(String(api.memory.get("lucentCustomFamilyAccents"))) : ({})
+        } catch (familyError) { customFamilyAccents = ({}) }
+        try {
+            customSystemAccents = api.memory.has("lucentCustomSystemAccents") ?
+                    JSON.parse(String(api.memory.get("lucentCustomSystemAccents"))) : ({})
+        } catch (systemError) { customSystemAccents = ({}) }
+        applyAccentPalette()
         systemLedEnabled = api.memory.has("lucentSystemLedEnabled") ?
                 Boolean(api.memory.get("lucentSystemLedEnabled")) : true
         systemLedBrightness = api.memory.has("lucentSystemLedBrightness") ?
                 Math.max(1, Math.min(100,
-                    Number(api.memory.get("lucentSystemLedBrightness")))) : 10
-        systemLedUseDeviceBrightness = api.memory.has("lucentSystemLedUseDeviceBrightness") ?
-                Boolean(api.memory.get("lucentSystemLedUseDeviceBrightness")) : true
-        // The retired four-field LED command could leave this preference OFF
-        // while the hardware stayed bright white. Re-enable the corrected
-        // stock-format controller once; the user can still turn it off later.
-        if (!api.memory.has("lucentSystemLedControllerV2")) {
+                    Number(api.memory.get("lucentSystemLedBrightness")))) : 2
+        // Split the old combined SYSTEM/manual row into independent enabled
+        // and brightness preferences. Migrate every existing install once to
+        // the requested safe default: enabled, system-matched, one percent.
+        if (!api.memory.has("lucentSplitLedControlsV1")) {
             systemLedEnabled = true
-            systemLedUseDeviceBrightness = true
+            systemLedBrightness = 2
             api.memory.set("lucentSystemLedEnabled", true)
-            api.memory.set("lucentSystemLedUseDeviceBrightness", true)
-            api.memory.set("lucentSystemLedControllerV2", true)
+            api.memory.set("lucentSystemLedBrightness", 2)
+            api.memory.set("lucentSplitLedControlsV1", true)
         }
+        // Existing 3.0.40/3.0.41 installs were intentionally migrated to 1%.
+        // Move that exact old default to the newly requested 2% once without
+        // overwriting a brightness the user had already customized.
+        if (!api.memory.has("lucentLedDefaultTwoPercentV1")) {
+            if (systemLedBrightness === 1) {
+                systemLedBrightness = 2
+                api.memory.set("lucentSystemLedBrightness", 2)
+            }
+            api.memory.set("lucentLedDefaultTwoPercentV1", true)
+        }
+        startViewPreference = api.memory.has("lucentStartView") ?
+                String(api.memory.get("lucentStartView")) : "cover"
         // Sound is on by default.  Migrate existing installs once because the
         // original theme persisted OFF even though the requested default is ON.
         if (!api.memory.has("parallaxPreviewSoundDefaultV1")) {
@@ -2087,6 +2427,8 @@ FocusScope {
                 Boolean(api.memory.get("parallaxReturningFromGame"))
         api.memory.set("parallaxReturningFromGame", false)
         if (!returningFromGame)
+            applyConfiguredStartView()
+        if (!returningFromGame)
             Qt.callLater(function() { root.startImportScan() })
         else
             Qt.callLater(function() { root.pollImportStatus() })
@@ -2123,6 +2465,31 @@ FocusScope {
             } else if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
                        event.key === Qt.Key_Escape) {
                 dismissReadyUpdate()
+            }
+            event.accepted = true
+        } else if (aboutOpen) {
+            if (api.keys.isAccept(event) || api.keys.isCancel(event) ||
+                    event.key === Qt.Key_Back || event.key === Qt.Key_Escape ||
+                    api.keys.isDetails(event))
+                aboutOpen = false
+            event.accepted = true
+        } else if (accentEditorOpen) {
+            if (api.keys.isCancel(event) || event.key === Qt.Key_Back ||
+                    event.key === Qt.Key_Escape) {
+                accentEditorOpen = false
+            } else if (event.key === Qt.Key_Up) {
+                accentEditorChannel = Math.max(0, accentEditorChannel - 1)
+            } else if (event.key === Qt.Key_Down) {
+                accentEditorChannel = Math.min(3, accentEditorChannel + 1)
+            } else if (event.key === Qt.Key_Left) {
+                adjustAccentEditor(-1)
+            } else if (event.key === Qt.Key_Right) {
+                adjustAccentEditor(1)
+            } else if (api.keys.isFilters(event)) {
+                resetAccentEditorColor()
+            } else if (api.keys.isAccept(event)) {
+                storeAccentEditorColor()
+                accentEditorOpen = false
             }
             event.accepted = true
         } else if (gameActionOpen) {
@@ -2178,7 +2545,7 @@ FocusScope {
             } else if (event.key === Qt.Key_Up) {
                 settingsIndex = Math.max(0, settingsIndex - 1)
             } else if (event.key === Qt.Key_Down) {
-                settingsIndex = Math.min(5, settingsIndex + 1)
+                settingsIndex = Math.min(10, settingsIndex + 1)
             } else if (event.key === Qt.Key_Left) {
                 activateSetting(-1)
             } else if (event.key === Qt.Key_Right) {
@@ -2234,30 +2601,43 @@ FocusScope {
                         launch(activeGame)
                 }
                 event.accepted = true
-            } else if (event.key === Qt.Key_Up) {
+            } else {
+                var coverSystemDirection = triggerDirection(event)
+                if (coverSystemDirection !== 0) {
+                    rememberHandledTrigger(coverSystemDirection)
+                    stepSystem(coverSystemDirection)
+                    event.accepted = true
+                } else if (api.keys.isPrevPage(event)) {
+                    focusHomeZone(homeZone <= 1 ? 7 : homeZone - 1)
+                    event.accepted = true
+                } else if (api.keys.isNextPage(event)) {
+                    focusHomeZone(homeZone >= 7 || homeZone === 0 ? 1 : homeZone + 1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Up) {
                 focusHomeZone(homeZone - 1)
                 event.accepted = true
-            } else if (event.key === Qt.Key_Down) {
+                } else if (event.key === Qt.Key_Down) {
                 focusHomeZone(homeZone + 1)
                 event.accepted = true
-            } else if (event.key === Qt.Key_Left) {
+                } else if (event.key === Qt.Key_Left) {
                 if (homeZone === 0)
                     root.stepSystem(-1)
                 else
                     root.stepHomeShelf(-1)
                 event.accepted = true
-            } else if (event.key === Qt.Key_Right) {
+                } else if (event.key === Qt.Key_Right) {
                 if (homeZone === 0)
                     root.stepSystem(1)
                 else
                     root.stepHomeShelf(1)
                 event.accepted = true
-            } else if (api.keys.isAccept(event)) {
+                } else if (api.keys.isAccept(event)) {
                 if (homeZone === 0)
                     enterCollection()
                 else
                     launch(homeShelfGame(homeZone))
                 event.accepted = true
+                }
             }
         } else {
             var openSystemDirection = triggerDirection(event)
@@ -2332,8 +2712,7 @@ FocusScope {
 
     Keys.onReleased: {
         if (searchField.activeFocus || root.settingsOpen ||
-                (root.page !== "games" &&
-                 !(root.page === "home" && root.homeViewMode === "list")))
+                (root.page !== "games" && root.page !== "home"))
             return
         var direction = root.triggerDirection(event)
         if (direction < 0) {
@@ -2662,36 +3041,69 @@ FocusScope {
         id: systemModel
         // All Systems is always present. Physical system cards are appended
         // from the catalog only when Pegasus actually found ROMs for them.
-        ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
+        ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; family: ""; accent: "#dce4f2" }
     }
 
     ListModel {
         id: systemCatalog
         // Chronological by first retail release. Years describe the primary
         // hardware/product lifecycle rather than online-service availability.
-        ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; accent: "#dce4f2" }
-        ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; accent: "#35d0e6" }
-        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; accent: "#ff9f43" }
-        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; accent: "#4fd17f" }
-        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; accent: "#ff9f43" }
-        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; accent: "#4fd17f" }
-        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; accent: "#ff9f43" }
-        ListElement { name: "PLAYSTATION"; years: "1994–2006"; mark: "PS1"; collectionName: "Sony PlayStation"; folder: "psx"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; accent: "#ff9f43" }
-        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; accent: "#4fd17f" }
-        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; accent: "#ff9f43" }
-        ListElement { name: "PLAYSTATION 2"; years: "2000–2013"; mark: "PS2"; collectionName: "Sony PlayStation 2"; folder: "ps2"; accent: "#a987ff" }
-        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; accent: "#ff9f43" }
-        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; accent: "#ff9f43" }
-        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; accent: "#ff9f43" }
-        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; accent: "#a987ff" }
-        ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; accent: "#ff9f43" }
-        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; accent: "#ff9f43" }
-        ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; accent: "#a987ff" }
-        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; accent: "#ff9f43" }
-        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; accent: "#4aa3ff" }
-        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; accent: "#ff9f43" }
+        ListElement { name: "ALL SYSTEMS"; years: "FULL LIBRARY"; mark: "ALL"; collectionName: ""; folder: "all"; family: ""; accent: "#dce4f2" }
+        ListElement { name: "ARCADE"; years: "1971–PRESENT"; mark: "AR"; collectionName: "Arcade"; folder: "arcade"; family: "arcade"; accent: "#35d0e6" }
+        ListElement { name: "APPLE II"; years: "1977–1993"; mark: "AII"; collectionName: "Apple II"; folder: "apple2"; family: "apple"; accent: "#a8b2c1" }
+        ListElement { name: "ATARI 2600"; years: "1977–1992"; mark: "2600"; collectionName: "Atari 2600"; folder: "atari2600"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "MAGNAVOX ODYSSEY²"; years: "1978–1984"; mark: "O²"; collectionName: "Magnavox Odyssey²"; folder: "odyssey2"; family: "magnavox"; accent: "#c7f464" }
+        ListElement { name: "MATTEL INTELLIVISION"; years: "1979–1990"; mark: "INTV"; collectionName: "Mattel Intellivision"; folder: "intellivision"; family: "mattel"; accent: "#48cae4" }
+        ListElement { name: "ATARI 8-BIT"; years: "1979–1992"; mark: "A8"; collectionName: "Atari 8-bit"; folder: "atari800"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "DOS"; years: "1981–2000"; mark: "DOS"; collectionName: "DOS"; folder: "dos"; family: "microsoft"; accent: "#4aa3ff" }
+        ListElement { name: "ATARI 5200"; years: "1982–1984"; mark: "5200"; collectionName: "Atari 5200"; folder: "atari5200"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "COLECOVISION"; years: "1982–1985"; mark: "CV"; collectionName: "ColecoVision"; folder: "colecovision"; family: "coleco"; accent: "#f72585" }
+        ListElement { name: "COMMODORE 64"; years: "1982–1994"; mark: "C64"; collectionName: "Commodore 64"; folder: "c64"; family: "commodore"; accent: "#23c9b8" }
+        ListElement { name: "ZX SPECTRUM"; years: "1982–1992"; mark: "ZX"; collectionName: "Sinclair ZX Spectrum"; folder: "zxspectrum"; family: "sinclair"; accent: "#e63946" }
+        ListElement { name: "NINTENDO ENTERTAINMENT SYSTEM"; years: "1983–2003"; mark: "NES"; collectionName: "Nintendo Entertainment System"; folder: "nes"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "SEGA SG-1000"; years: "1983–1985"; mark: "SG"; collectionName: "Sega SG-1000"; folder: "sg1000"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "MSX"; years: "1983–1995"; mark: "MSX"; collectionName: "Microsoft MSX"; folder: "msx"; family: "microsoft"; accent: "#4aa3ff" }
+        ListElement { name: "AMSTRAD CPC"; years: "1984–1990"; mark: "CPC"; collectionName: "Amstrad CPC"; folder: "amstradcpc"; family: "amstrad"; accent: "#00b4d8" }
+        ListElement { name: "COMMODORE AMIGA"; years: "1985–1996"; mark: "AMIGA"; collectionName: "Commodore Amiga"; folder: "amiga"; family: "commodore"; accent: "#23c9b8" }
+        ListElement { name: "ATARI ST"; years: "1985–1993"; mark: "ST"; collectionName: "Atari ST"; folder: "atarist"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "SEGA MASTER SYSTEM"; years: "1985–1996"; mark: "SMS"; collectionName: "Sega Master System"; folder: "mastersystem"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "ATARI 7800"; years: "1986–1992"; mark: "7800"; collectionName: "Atari 7800"; folder: "atari7800"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "NEC PC ENGINE"; years: "1987–1994"; mark: "PCE"; collectionName: "NEC PC Engine"; folder: "pcengine"; family: "nec"; accent: "#ef6cff" }
+        ListElement { name: "NEC PC ENGINE CD"; years: "1988–1999"; mark: "PCECD"; collectionName: "NEC PC Engine CD"; folder: "pcenginecd"; family: "nec"; accent: "#ef6cff" }
+        ListElement { name: "SEGA GENESIS"; years: "1988–1997"; mark: "GEN"; collectionName: "Sega Genesis"; folder: "megadrive"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "GAME BOY"; years: "1989–2003"; mark: "GB"; collectionName: "Nintendo Game Boy"; folder: "gb"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "SEGA GAME GEAR"; years: "1990–1997"; mark: "GG"; collectionName: "Sega Game Gear"; folder: "gamegear"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "SNK NEO GEO"; years: "1990–2004"; mark: "NEO"; collectionName: "SNK Neo Geo"; folder: "neogeo"; family: "snk"; accent: "#ffd166" }
+        ListElement { name: "SUPER NINTENDO"; years: "1990–2003"; mark: "SNES"; collectionName: "Super Nintendo Entertainment System"; folder: "snes"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "SEGA CD"; years: "1991–1996"; mark: "SCD"; collectionName: "Sega CD"; folder: "segacd"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "3DO"; years: "1993–1996"; mark: "3DO"; collectionName: "3DO Interactive Multiplayer"; folder: "3do"; family: "3do"; accent: "#b8f2e6" }
+        ListElement { name: "AMIGA CD32"; years: "1993–1994"; mark: "CD32"; collectionName: "Commodore Amiga CD32"; folder: "amigacd32"; family: "commodore"; accent: "#23c9b8" }
+        ListElement { name: "ATARI JAGUAR"; years: "1993–1996"; mark: "JAG"; collectionName: "Atari Jaguar"; folder: "jaguar"; family: "atari"; accent: "#ff5964" }
+        ListElement { name: "SEGA 32X"; years: "1994–1996"; mark: "32X"; collectionName: "Sega 32X"; folder: "sega32x"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "SEGA SATURN"; years: "1994–2000"; mark: "SAT"; collectionName: "Sega Saturn"; folder: "saturn"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "PLAYSTATION"; years: "1994–2006"; mark: "PS1"; collectionName: "Sony PlayStation"; folder: "psx"; family: "sony"; accent: "#a987ff" }
+        ListElement { name: "NEO GEO CD"; years: "1994–1997"; mark: "NGCD"; collectionName: "SNK Neo Geo CD"; folder: "neogeocd"; family: "snk"; accent: "#ffd166" }
+        ListElement { name: "VIRTUAL BOY"; years: "1995–1996"; mark: "VB"; collectionName: "Nintendo Virtual Boy"; folder: "virtualboy"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO 64"; years: "1996–2002"; mark: "N64"; collectionName: "Nintendo 64"; folder: "n64"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "SEGA DREAMCAST"; years: "1998–2001"; mark: "DC"; collectionName: "Sega Dreamcast"; folder: "dreamcast"; family: "sega"; accent: "#4fd17f" }
+        ListElement { name: "GAME BOY COLOR"; years: "1998–2003"; mark: "GBC"; collectionName: "Nintendo Game Boy Color"; folder: "gbc"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "NEO GEO POCKET"; years: "1998–1999"; mark: "NGP"; collectionName: "SNK Neo Geo Pocket"; folder: "ngp"; family: "snk"; accent: "#ffd166" }
+        ListElement { name: "BANDAI WONDERSWAN"; years: "1999–2003"; mark: "WS"; collectionName: "Bandai WonderSwan"; folder: "wonderswan"; family: "bandai"; accent: "#ff7d3a" }
+        ListElement { name: "PLAYSTATION 2"; years: "2000–2013"; mark: "PS2"; collectionName: "Sony PlayStation 2"; folder: "ps2"; family: "sony"; accent: "#a987ff" }
+        ListElement { name: "WONDERSWAN COLOR"; years: "2000–2003"; mark: "WSC"; collectionName: "Bandai WonderSwan Color"; folder: "wonderswancolor"; family: "bandai"; accent: "#ff7d3a" }
+        ListElement { name: "GAME BOY ADVANCE"; years: "2001–2010"; mark: "GBA"; collectionName: "Nintendo Game Boy Advance"; folder: "gba"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO GAMECUBE"; years: "2001–2007"; mark: "GC"; collectionName: "Nintendo GameCube"; folder: "gc"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "MICROSOFT XBOX"; years: "2001–2009"; mark: "XBOX"; collectionName: "Microsoft Xbox"; folder: "xbox"; family: "microsoft"; accent: "#4aa3ff" }
+        ListElement { name: "NINTENDO DS"; years: "2004–2014"; mark: "NDS"; collectionName: "Nintendo DS"; folder: "nds"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "PLAYSTATION PORTABLE"; years: "2004–2014"; mark: "PSP"; collectionName: "Sony PlayStation Portable"; folder: "psp"; family: "sony"; accent: "#a987ff" }
+        ListElement { name: "XBOX 360"; years: "2005–2016"; mark: "X360"; collectionName: "Microsoft Xbox 360"; folder: "xbox360"; family: "microsoft"; accent: "#4aa3ff" }
+        ListElement { name: "PLAYSTATION 3"; years: "2006–2017"; mark: "PS3"; collectionName: "Sony PlayStation 3"; folder: "ps3"; family: "sony"; accent: "#a987ff" }
+        ListElement { name: "NINTENDO WII"; years: "2006–2017"; mark: "WII"; collectionName: "Nintendo Wii"; folder: "wii"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "NINTENDO 3DS"; years: "2011–2020"; mark: "3DS"; collectionName: "Nintendo 3DS"; folder: "n3ds"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "PLAYSTATION VITA"; years: "2011–2019"; mark: "VITA"; collectionName: "Sony PlayStation Vita"; folder: "psvita"; family: "sony"; accent: "#a987ff" }
+        ListElement { name: "NINTENDO WII U"; years: "2012–2017"; mark: "WIIU"; collectionName: "Nintendo Wii U"; folder: "wiiu"; family: "nintendo"; accent: "#ff9f43" }
+        ListElement { name: "WINDOWS"; years: "1985–PRESENT"; mark: "WIN"; collectionName: "Microsoft Windows"; folder: "windows"; family: "microsoft"; accent: "#4aa3ff" }
+        ListElement { name: "NINTENDO SWITCH"; years: "2017–PRESENT"; mark: "NSW"; collectionName: "Nintendo Switch"; folder: "switch"; family: "nintendo"; accent: "#ff9f43" }
     }
 
     // Predecode official platform logotypes used by the rail. Full-resolution system
@@ -3727,7 +4139,9 @@ FocusScope {
                        ((!root.dualScreenDevice ? singleScreenPip.x : homeListBoxArt.x) - x - 28) :
                        parent.width - 116
                 visible: root.homeZone > 0
-                text: root.activeGame ? root.displayTitle(root.activeGame) : "CONTINUE PLAYING"
+                text: root.homeListBrowsingSystems ?
+                      systemModel.get(systemRail.currentIndex).name :
+                      (root.activeGame ? root.displayTitle(root.activeGame) : "CONTINUE PLAYING")
                 color: "white"
                 font.family: global.fonts.condensed
                 font.pixelSize: 60
@@ -3741,7 +4155,8 @@ FocusScope {
                 x: 62
                 y: 224
                 visible: root.homeZone > 0
-                text: root.gameFactsText(root.activeGame)
+                text: root.homeListBrowsingSystems ?
+                      root.homeSystemStatsText() : root.gameFactsText(root.activeGame)
                 color: root.accent
                 font.family: global.fonts.sans
                 font.pixelSize: 22
@@ -3753,9 +4168,9 @@ FocusScope {
                 x: 62
                 y: 262
                 visible: root.homeZone > 0
-                text: root.homeShelfName(root.homeZone) +
-                      (root.homeViewMode === "list" && root.homeListFocusColumn === 0 ?
-                       "     RANDOM PREVIEW  •  A  SELECT SYSTEM" : "     A  PLAY")
+                text: root.homeViewMode === "list" ?
+                      root.homeSystemInstructionText() :
+                      root.homeShelfName(root.homeZone) + "     A  PLAY"
                 color: "#aeb6c8"
                 font.family: global.fonts.sans
                 font.pixelSize: 17
@@ -4212,7 +4627,8 @@ FocusScope {
 
             Item {
                 id: homeListBoxArt
-                visible: root.homeViewMode === "list" && root.activeGame
+                visible: root.homeViewMode === "list" &&
+                         root.homeListFocusColumn === 1 && root.activeGame
                 x: parent.width - width - 58
                 y: 108
                 width: 150
@@ -4251,7 +4667,7 @@ FocusScope {
                     ListView {
                         id: homeSystemList
                         x: 10
-                        y: 23
+                        y: 0
                         width: parent.width - 20
                         // Exactly nine 70 px rows plus eight 4 px gaps. The
                         // viewport can never expose a fractional row.
@@ -4285,9 +4701,10 @@ FocusScope {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 112
                                 height: 44
-                                source: model.folder === "all" ? "" :
+                                source: model.folder === "all" ?
+                                        Qt.resolvedUrl("assets/hardware-cutouts/all/0.png") :
                                         Qt.resolvedUrl("assets/logos-png/" + model.folder + ".png")
-                                visible: model.folder !== "all" && status !== Image.Error
+                                visible: status !== Image.Error
                                 fillMode: Image.PreserveAspectFit
                                 horizontalAlignment: Image.AlignLeft
                                 asynchronous: true
@@ -4300,8 +4717,8 @@ FocusScope {
                                 x: 14
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 112
-                                visible: model.folder === "all" || homeSystemLogo.status === Image.Error
-                                text: model.folder === "all" ? "ALL SYSTEMS" : model.mark
+                                visible: homeSystemLogo.status === Image.Error
+                                text: model.mark
                                 color: homeSystemRow.isSelected ? "#071016" : "white"
                                 horizontalAlignment: Text.AlignHCenter
                                 font.family: global.fonts.condensed
@@ -5010,7 +5427,7 @@ FocusScope {
             Text {
                 anchors.right: parent.right
                 anchors.rightMargin: 62
-                y: 1040
+                y: 998
                 text: "L1 / R1  SORT     L2 / R2  SYSTEM     Y  VIEW: " + root.gameViewMode.toUpperCase() +
                       "     X  SETTINGS     D-PAD  NAVIGATE     B  BACK     A  PLAY     HOLD GAME  OPTIONS"
                 color: "#7f899c"
@@ -5026,11 +5443,11 @@ FocusScope {
         z: 90
         anchors.right: parent.right
         anchors.rightMargin: 62
-        y: 1040
+        y: 998
         visible: root.page === "home" && !root.settingsOpen
         text: root.homeViewMode === "list" ?
-              "L1 / R1  VIEW     L2 / R2  SYSTEM     LEFT / RIGHT  VIEW     UP / DOWN  SELECT     Y  LAYOUT: LIST     X  SETTINGS     A  PLAY" :
-              "Y  VIEW: COVERS     X  SETTINGS     D-PAD  NAVIGATE     A  OPEN"
+              "L1 / R1  CATEGORY     L2 / R2  SYSTEM     LEFT / RIGHT  VIEW     UP / DOWN  SELECT     Y  LAYOUT     X  SETTINGS     B  SYSTEM LIST     A  PLAY" :
+              "L1 / R1  CATEGORY     L2 / R2  SYSTEM     Y  LAYOUT     X  SETTINGS     D-PAD  NAVIGATE     A  OPEN"
         color: "#7f899c"
         font.family: global.fonts.sans
         font.pixelSize: 15
@@ -5044,6 +5461,20 @@ FocusScope {
                 root.settingsIndex = 0
             }
         }
+    }
+
+    Text {
+        z: 90
+        anchors.left: parent.left
+        anchors.leftMargin: 62
+        y: 998
+        visible: !root.settingsOpen
+        text: root.currentViewName
+        color: "#7f899c"
+        font.family: global.fonts.sans
+        font.pixelSize: 15
+        font.weight: Font.DemiBold
+        font.letterSpacing: 1
     }
 
     Rectangle {
@@ -5427,6 +5858,12 @@ FocusScope {
                 font.pixelSize: 17
             }
 
+            // Keep the legacy row declarations inert for source compatibility;
+            // the compact settings sheet below is the active settings UI.
+            Item {
+                visible: false
+                anchors.fill: parent
+
             Rectangle {
                 x: 44
                 y: 150
@@ -5768,14 +6205,319 @@ FocusScope {
                 }
             }
 
+            }
+
+            Repeater {
+                model: 11
+
+                Rectangle {
+                    property int setting: index
+                    x: 44
+                    y: 126 + index * 70
+                    width: settingsPanel.width - 88
+                    height: 62
+                    color: root.settingsIndex === setting ? "#261f2a38" : "#9b111720"
+                    border.width: root.settingsIndex === setting ? 2 : 1
+                    border.color: root.settingsIndex === setting ? root.accent : "#30ffffff"
+                    radius: 5
+
+                    Text {
+                        x: 24
+                        y: 8
+                        text: root.settingTitle(parent.setting)
+                        color: "white"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 17
+                        font.weight: Font.Bold
+                        font.letterSpacing: 0.8
+                    }
+
+                    Text {
+                        x: 24
+                        y: 34
+                        width: parent.width - (parent.setting === 8 ? 420 : 300)
+                        text: root.settingDescription(parent.setting)
+                        color: "#9da7b8"
+                        elide: Text.ElideRight
+                        font.family: global.fonts.sans
+                        font.pixelSize: 12
+                    }
+
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: parent.setting === 7 ? 92 : 24
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.setting === 8 ? 330 : 250
+                        horizontalAlignment: Text.AlignRight
+                        text: root.settingValue(parent.setting)
+                        color: root.accent
+                        elide: Text.ElideRight
+                        font.family: global.fonts.condensed
+                        font.pixelSize: parent.setting === 8 ? 22 : 25
+                        font.weight: Font.Bold
+                    }
+
+                    Rectangle {
+                        visible: parent.setting === 7
+                        anchors.right: parent.right
+                        anchors.rightMargin: 24
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 48
+                        height: 48
+                        radius: 24
+                        color: "#221f2a38"
+                        border.width: 1
+                        border.color: "#45ffffff"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "+"
+                            color: "white"
+                            font.pixelSize: 27
+                            font.bold: true
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                            root.settingsIndex = 7
+                                root.setSystemLedBrightness(root.systemLedBrightness + 1)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        visible: parent.setting === 7
+                        anchors.right: parent.right
+                        anchors.rightMargin: 184
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 48
+                        height: 48
+                        radius: 24
+                        color: "#221f2a38"
+                        border.width: 1
+                        border.color: "#45ffffff"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "−"
+                            color: "white"
+                            font.pixelSize: 27
+                            font.bold: true
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                            root.settingsIndex = 7
+                                root.setSystemLedBrightness(root.systemLedBrightness - 1)
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        x: 0
+                        y: 0
+                        width: parent.setting === 7 ? parent.width - 244 : parent.width
+                        height: parent.height
+                        onClicked: {
+                            root.settingsIndex = parent.setting
+                            root.activateSetting(0)
+                        }
+                    }
+                }
+            }
+
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: 920
+                y: 925
                 text: "UP / DOWN  SELECT     LEFT / RIGHT  CHANGE     B  CLOSE"
                 color: "#7f899c"
                 font.family: global.fonts.sans
                 font.pixelSize: 15
                 font.letterSpacing: 1
+            }
+        }
+    }
+
+    Rectangle {
+        id: accentEditorOverlay
+        z: 820
+        anchors.fill: parent
+        visible: root.accentEditorOpen
+        color: "#e805080d"
+
+        MouseArea { anchors.fill: parent }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 900
+            height: 630
+            color: "#fa0d121a"
+            border.width: 2
+            border.color: root.accentEditorColor()
+            radius: 10
+
+            Text {
+                x: 48; y: 36
+                text: "CUSTOM ACCENT COLORS"
+                color: "white"
+                font.family: global.fonts.condensed
+                font.pixelSize: 40
+                font.weight: Font.Bold
+                font.letterSpacing: 2
+            }
+            Text {
+                x: 50; y: 88
+                text: root.accentGrouping === "system" ?
+                      "Each installed system keeps its own color" :
+                      "Systems share the color assigned to their platform family"
+                color: "#9da7b8"
+                font.family: global.fonts.sans
+                font.pixelSize: 17
+            }
+
+            Rectangle {
+                x: 596; y: 132; width: 248; height: 248
+                color: root.accentEditorColor()
+                radius: 124
+                border.width: 4
+                border.color: "#c8ffffff"
+            }
+
+            Repeater {
+                model: 4
+                Rectangle {
+                    property int channel: index
+                    x: 48
+                    y: 132 + index * 92
+                    width: 500
+                    height: 72
+                    color: root.accentEditorChannel === channel ?
+                           "#323d4656" : "#8c111720"
+                    border.width: root.accentEditorChannel === channel ? 2 : 1
+                    border.color: root.accentEditorChannel === channel ?
+                                  root.accentEditorColor() : "#30ffffff"
+                    radius: 6
+
+                    Text {
+                        x: 22
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: ["TARGET", "HUE", "SATURATION", "LIGHTNESS"][parent.channel]
+                        color: "#aeb6c8"
+                        font.family: global.fonts.sans
+                        font.pixelSize: 17
+                        font.weight: Font.Bold
+                        font.letterSpacing: 1.2
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 22
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 300
+                        horizontalAlignment: Text.AlignRight
+                        text: {
+                            var targets = root.accentTargets()
+                            if (parent.channel === 0)
+                                return targets.length ? root.accentTargetLabel(
+                                        targets[root.accentEditorTargetIndex]) : "NO SYSTEMS"
+                            if (parent.channel === 1)
+                                return Math.round(root.accentEditorHue * 360) + "°"
+                            if (parent.channel === 2)
+                                return Math.round(root.accentEditorSaturation * 100) + "%"
+                            return Math.round(root.accentEditorLightness * 100) + "%"
+                        }
+                        color: root.accentEditorColor()
+                        font.family: global.fonts.condensed
+                        font.pixelSize: 25
+                        fontSizeMode: Text.Fit
+                        minimumPixelSize: 14
+                        font.weight: Font.Bold
+                        elide: Text.ElideNone
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.accentEditorChannel = parent.channel
+                    }
+                }
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 550
+                text: "UP / DOWN  FIELD     LEFT / RIGHT  ADJUST     Y  RESET     A  SAVE     B  CLOSE"
+                color: "#8f99aa"
+                font.family: global.fonts.sans
+                font.pixelSize: 14
+                font.letterSpacing: 1
+            }
+        }
+    }
+
+    Rectangle {
+        id: aboutOverlay
+        z: 830
+        anchors.fill: parent
+        visible: root.aboutOpen
+        color: "#e805080d"
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: { root.aboutOpen = false; root.forceActiveFocus() }
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 980
+            height: 650
+            color: "#fa0d121a"
+            border.width: 2
+            border.color: root.accent
+            radius: 10
+
+            MouseArea { anchors.fill: parent }
+
+            Text {
+                x: 56; y: 42
+                text: "LUCENT  " + root.lucentVersion
+                color: "white"
+                font.family: global.fonts.condensed
+                font.pixelSize: 48
+                font.weight: Font.Bold
+                font.letterSpacing: 2
+            }
+            Text {
+                x: 58; y: 116; width: parent.width - 116
+                text: "A unified Android game library, media manager, and Lucent theme powered by Pegasus Frontend."
+                wrapMode: Text.WordWrap
+                color: "#d8deea"
+                font.family: global.fonts.sans
+                font.pixelSize: 21
+                lineHeight: 1.3
+            }
+            Text {
+                x: 58; y: 214; width: parent.width - 116
+                text: "PEGASUS FRONTEND\nCreated by Mátyás M. and contributors\nLicensed under GNU GPL version 3\nhttps://github.com/mmatyas/pegasus-frontend\n\nLUCENT\nLucent's Android integration and default theme are distributed under GPLv3-compatible terms. Other Pegasus themes remain supported and can be selected from Pegasus settings."
+                wrapMode: Text.WordWrap
+                color: "#aeb7c8"
+                font.family: global.fonts.sans
+                font.pixelSize: 19
+                lineHeight: 1.35
+            }
+            Text {
+                x: 58; y: 490; width: parent.width - 116
+                text: "Platform names and logos are identification marks belonging to their respective owners. Their appearance does not imply sponsorship or endorsement."
+                wrapMode: Text.WordWrap
+                color: "#8f99aa"
+                font.family: global.fonts.sans
+                font.pixelSize: 16
+                lineHeight: 1.3
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 600
+                text: "A / B  CLOSE"
+                color: root.accent
+                font.family: global.fonts.sans
+                font.pixelSize: 15
+                font.weight: Font.Bold
+                font.letterSpacing: 1.2
             }
         }
     }

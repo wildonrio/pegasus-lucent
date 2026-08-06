@@ -4,10 +4,12 @@ import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -35,6 +37,9 @@ import java.net.URLEncoder;
 public final class BrowserActivity extends Activity {
     public static final String EXTRA_URL = "com.thorium.preview.BROWSER_URL";
     private static final String HOME = "https://www.google.com/";
+    private static final String PREFS = "lucent_browser";
+    private static final String LAST_URL = "last_url";
+    private static final String TAG = "LucentBrowser";
     private static final int BAR_COLOR = Color.rgb(11, 14, 20);
     private static final int FIELD_COLOR = Color.rgb(27, 32, 42);
 
@@ -125,6 +130,7 @@ public final class BrowserActivity extends Activity {
 
             @Override public void onPageFinished(WebView view, String url) {
                 address.setText(url);
+                rememberUrl(url);
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -151,7 +157,8 @@ public final class BrowserActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
 
-        if (state == null) webView.loadUrl(initialUrl(getIntent()));
+        if (state == null || webView.restoreState(state) == null)
+            webView.loadUrl(initialUrl(getIntent()));
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -162,9 +169,14 @@ public final class BrowserActivity extends Activity {
     }
 
     private String initialUrl(Intent intent) {
-        if (intent == null) return HOME;
-        String requested = intent.getStringExtra(EXTRA_URL);
-        return requested == null || requested.trim().isEmpty() ? HOME : requested.trim();
+        String requested = intent == null ? null : intent.getStringExtra(EXTRA_URL);
+        if (requested != null && !requested.trim().isEmpty()) return requested.trim();
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(LAST_URL, HOME);
+    }
+
+    private void rememberUrl(String url) {
+        if (url == null || url.trim().isEmpty() || "about:blank".equals(url)) return;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(LAST_URL, url).apply();
     }
 
     private TextView button(String text, View.OnClickListener action) {
@@ -218,29 +230,52 @@ public final class BrowserActivity extends Activity {
                                                String contentDisposition,
                                                String mimeType, long contentLength) {
             try {
+                Uri downloadUri = Uri.parse(url);
+                String scheme = downloadUri.getScheme();
+                if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))
+                    throw new IllegalArgumentException("Unsupported download scheme: " + scheme);
                 String fileName = uniqueDownloadName(
-                        URLUtil.guessFileName(url, contentDisposition, mimeType));
-                DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+                        sanitizeFileName(URLUtil.guessFileName(url, contentDisposition, mimeType)));
+                DownloadManager.Request request = new DownloadManager.Request(downloadUri);
                 request.setMimeType(mimeType);
-                request.addRequestHeader("User-Agent", userAgent);
+                String effectiveUserAgent = userAgent == null || userAgent.isEmpty() ?
+                        webView.getSettings().getUserAgentString() : userAgent;
+                request.addRequestHeader("User-Agent", effectiveUserAgent);
                 String cookie = CookieManager.getInstance().getCookie(url);
                 if (cookie != null && !cookie.isEmpty()) request.addRequestHeader("Cookie", cookie);
+                String referer = webView == null ? null : webView.getUrl();
+                if (referer != null && !referer.isEmpty())
+                    request.addRequestHeader("Referer", referer);
+                request.addRequestHeader("Accept", "*/*");
+                request.addRequestHeader("Accept-Language", "en-US,en;q=0.9");
                 request.setTitle(fileName);
                 request.setDescription("Downloaded from Lucent Browser");
+                request.setAllowedOverMetered(true);
+                request.setAllowedOverRoaming(true);
                 request.setNotificationVisibility(
                         DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
                         fileName);
                 DownloadManager manager = (DownloadManager)
                         getSystemService(Context.DOWNLOAD_SERVICE);
-                manager.enqueue(request);
+                if (manager == null) throw new IllegalStateException("DownloadManager unavailable");
+                long downloadId = manager.enqueue(request);
+                Log.i(TAG, "Queued background download " + downloadId + " from " + url +
+                        " referer=" + referer);
                 Toast.makeText(BrowserActivity.this,
-                        "Downloading to Downloads: " + fileName, Toast.LENGTH_LONG).show();
+                        "Background download started: " + fileName, Toast.LENGTH_LONG).show();
             } catch (Exception error) {
+                Log.e(TAG, "Download could not be started: " + url, error);
                 Toast.makeText(BrowserActivity.this,
-                        "Download could not be started", Toast.LENGTH_LONG).show();
+                        "Download failed to start: " + error.getMessage(), Toast.LENGTH_LONG).show();
             }
         }
+    }
+
+    private String sanitizeFileName(String requestedName) {
+        String cleaned = requestedName == null ? "download" :
+                requestedName.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").trim();
+        return cleaned.isEmpty() ? "download" : cleaned;
     }
 
     private String uniqueDownloadName(String requestedName) {
@@ -262,6 +297,16 @@ public final class BrowserActivity extends Activity {
     @Override public void onBackPressed() {
         if (webView != null && webView.canGoBack()) webView.goBack();
         else super.onBackPressed();
+    }
+
+    @Override protected void onPause() {
+        if (webView != null) rememberUrl(webView.getUrl());
+        super.onPause();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        if (webView != null) webView.saveState(state);
+        super.onSaveInstanceState(state);
     }
 
     @Override protected void onDestroy() {

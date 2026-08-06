@@ -38,6 +38,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -122,6 +123,7 @@ final class ImportManager {
     private volatile Map<String, GameRankingsRecord> gamerankingsAliasIndex;
     private volatile Map<String, MobyGamesRecord> mobygamesIndex;
     private volatile Map<String, MobyGamesRecord> mobygamesAliasIndex;
+    private volatile Map<String, BundledGameRecord> bundledGameIndex;
 
     ImportManager(Context context) {
         this.context = context.getApplicationContext();
@@ -181,6 +183,19 @@ final class ImportManager {
         synchronized (statusLock) {
             return status.toString();
         }
+    }
+
+    Set<String> activeSystemFolders() {
+        Set<String> systems = new LinkedHashSet<>();
+        JSONArray registry = readRegistry();
+        for (int index = 0; index < registry.length(); index++) {
+            JSONObject row = registry.optJSONObject(index);
+            if (row == null || row.optBoolean("archived", false) &&
+                    !row.optBoolean("forceInclude", false)) continue;
+            String folder = row.optString("system");
+            if (GameSystems.byFolder(folder) != null) systems.add(folder);
+        }
+        return systems;
     }
 
     String archiveJson() {
@@ -387,7 +402,10 @@ final class ImportManager {
                 // treating the half-finished row as complete.
                 if (saved != null && saved.optInt("enrichmentVersion", 0) < 2) {
                     ImportedGame pending = ImportedGame.fromJson(saved);
-                    if (pending != null) imported.add(pending);
+                    if (pending != null) {
+                        enrichBundledMetadata(pending);
+                        imported.add(pending);
+                    }
                 }
                 if (candidate.zipEntry != null)
                     archiveSuccesses.put(candidate.source,
@@ -396,6 +414,9 @@ final class ImportManager {
             }
             ImportedGame game = importCandidate(candidate, mediaRoot, cacheRoot);
             if (game != null) {
+                // Text metadata is packaged with Lucent and becomes visible in
+                // Pegasus before any slower media or network work begins.
+                enrichBundledMetadata(game);
                 imported.add(game);
                 registry.put(game.toJson());
                 writeJsonAtomic(REGISTRY, registry);
@@ -423,6 +444,7 @@ final class ImportManager {
             if (row == null || queuedIdentities.contains(row.optString("sourceIdentity"))) continue;
             ImportedGame pending = ImportedGame.fromJson(row);
             if (pending != null && row.optInt("enrichmentVersion", 0) < 2) {
+                enrichBundledMetadata(pending);
                 imported.add(pending);
                 queuedIdentities.add(pending.sourceIdentity);
             }
@@ -449,7 +471,10 @@ final class ImportManager {
                     "Matching ratings, releases, developers, and publishers…", titles,
                     imported.size(), false);
             for (ImportedGame game : imported) {
-                enrichMetacritic(game, cacheRoot);
+                // Packaged metadata is authoritative and instant. Online
+                // lookup remains a fallback only for titles not present in the
+                // bundled catalog, never a startup-wide scraping pass.
+                if (!hasCompleteBundledMetadata(game)) enrichMetacritic(game, cacheRoot);
                 enrichGameRankings(game);
                 enrichMobyGames(game);
                 calculateCriticComposite(game);
@@ -486,6 +511,12 @@ final class ImportManager {
         } else {
             message = "Library scan complete • no new games";
         }
+        List<EmulatorCatalog.Entry> missingEmulators = EmulatorCatalog.missingFor(
+                context, activeSystemFolders());
+        if (!missingEmulators.isEmpty())
+            message += " • " + missingEmulators.size() +
+                    (missingEmulators.size() == 1 ? " emulator needs" : " emulators need") +
+                    " Android install confirmation";
         setStatus("complete", 1.0, message, titles, imported.size(), reload);
     }
 
@@ -1112,6 +1143,69 @@ final class ImportManager {
         return null;
     }
 
+    private void enrichBundledMetadata(ImportedGame game) {
+        BundledGameRecord record = bundledGameRecord(game.system.folder, game.title);
+        if (record == null) return;
+        if (record.critic > 0) game.critic = (int)Math.round(record.critic * 10.0);
+        if (record.user > 0) game.user = record.user;
+        if (!record.release.isEmpty()) game.release = record.release;
+        addUnique(game.developers, record.developer);
+        addUnique(game.publishers, record.publisher);
+        if (!record.criticSources.isEmpty()) game.criticSources = record.criticSources;
+        if (!record.userSources.isEmpty()) game.userSources = record.userSources;
+        if (game.critic > 0 || game.user > 0)
+            game.scoreSource = "Lucent bundled catalog";
+    }
+
+    private static boolean hasCompleteBundledMetadata(ImportedGame game) {
+        return "Lucent bundled catalog".equals(game.scoreSource) && game.critic > 0 &&
+                game.user > 0 && !game.release.isEmpty();
+    }
+
+    private BundledGameRecord bundledGameRecord(String folder, String title) {
+        return bundledGameIndex().get(folder + "\t" + normalize(title));
+    }
+
+    private synchronized Map<String, BundledGameRecord> bundledGameIndex() {
+        if (bundledGameIndex != null) return bundledGameIndex;
+        Map<String, BundledGameRecord> index = new HashMap<>();
+        int resourceId = context.getResources().getIdentifier(
+                "lucent_game_metadata", "raw", context.getPackageName());
+        if (resourceId == 0) {
+            bundledGameIndex = index;
+            return index;
+        }
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                context.getResources().openRawResource(resourceId), StandardCharsets.UTF_8))) {
+            String line;
+            boolean header = true;
+            while ((line = reader.readLine()) != null) {
+                if (header) { header = false; continue; }
+                String[] fields = line.split("\t", -1);
+                if (fields.length < 3) continue;
+                double critic = numeric(fieldAt(fields, 3));
+                double user = numeric(fieldAt(fields, 4));
+                BundledGameRecord record = new BundledGameRecord(fieldAt(fields, 2),
+                        critic, user, fieldAt(fields, 5), fieldAt(fields, 6),
+                        fieldAt(fields, 7), fieldAt(fields, 8), fieldAt(fields, 9));
+                index.put(fieldAt(fields, 0) + "\t" + fieldAt(fields, 1), record);
+            }
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to load bundled Lucent game metadata", error);
+        }
+        bundledGameIndex = index;
+        return index;
+    }
+
+    private static double numeric(String value) {
+        try { return Double.parseDouble(value); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
+    private static String fieldAt(String[] fields, int index) {
+        return index >= 0 && index < fields.length ? fields[index] : "";
+    }
+
     private void enrichMetacritic(ImportedGame game, File cacheRoot) {
         if (game.system.metacriticPlatform.isEmpty()) return;
         try {
@@ -1246,7 +1340,10 @@ final class ImportManager {
             weighted += game.mobygamesScore * 5;
             weight += 5;
         }
-        game.critic = weight == 0 ? 0 : (int)Math.round(weighted / weight);
+        // Preserve Lucent's bundled composite when no external component was
+        // available. This keeps offline imports from losing known scores.
+        if (weight == 0) return;
+        game.critic = (int)Math.round(weighted / weight);
         List<String> sources = new ArrayList<>();
         if (game.metacriticCritic > 0) sources.add("Metacritic");
         if (game.gamerankingsScore > 0) sources.add("GameRankings");
@@ -2403,6 +2500,10 @@ final class ImportManager {
                     "-n com.thorium.preview/.RomLaunchActivity --es path \"{file.path}\" " +
                     "--es target_package dev.legacy.eden_emulator " +
                     "--es target_activity org.yuzu.yuzu_emu.activities.EmulationActivity --activity-clear-top";
+        if ("switch".equals(system) && installed("org.citron.citron_emu"))
+            return "am start --user 0 -a com.thorium.launchbridge.LAUNCH_FILE " +
+                    "-n com.thorium.preview/com.thorium.launchbridge.LaunchActivity " +
+                    "--es path \"{file.path}\" --ez switch_mode true --activity-clear-top";
         if ("wiiu".equals(system) && installed("info.cemu.cemu"))
             return "am start --user 0 -a com.thorium.preview.LAUNCH_FILE " +
                     "-n com.thorium.preview/.RomLaunchActivity --es path \"{file.path}\" " +
@@ -2414,6 +2515,9 @@ final class ImportManager {
         if ("psp".equals(system) && installed("org.ppsspp.ppsspp"))
             return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
                     "-n org.ppsspp.ppsspp/.PpssppActivity --activity-clear-top";
+        if ("psp".equals(system) && installed("org.ppsspp.ppssppgold"))
+            return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
+                    "-n org.ppsspp.ppssppgold/org.ppsspp.ppsspp.PpssppActivity --activity-clear-top";
         if ("n64".equals(system) && installed("org.mupen64plusae.v3.fzurita.pro"))
             return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
                     "-n org.mupen64plusae.v3.fzurita.pro/paulscode.android.mupen64plusae.SplashActivity --activity-clear-top";
@@ -2426,7 +2530,68 @@ final class ImportManager {
         if ("n3ds".equals(system) && installed("org.citra.citra_emu"))
             return "am start --user 0 -a android.intent.action.VIEW -d \"{file.path}\" " +
                     "-n org.citra.citra_emu/.ui.main.MainActivity --activity-clear-top";
+        if ("n3ds".equals(system) && installed("io.github.lime3ds.android"))
+            return bridgeLaunch("io.github.lime3ds.android",
+                    "org.citra.citra_emu.activities.EmulationActivity");
+
+        // Standalone emulators use a FileProvider bridge so new imports launch
+        // the game itself rather than dropping the user into an emulator menu.
+        if ("arcade".equals(system) && installed("com.seleuco.mame4d2024"))
+            return bridgeLaunch("com.seleuco.mame4d2024",
+                    "com.seleuco.mame4droid.MAME4droid");
+        if ("atari2600".equals(system) && installed("com.explusalpha.A2600Emu"))
+            return bridgeLaunch("com.explusalpha.A2600Emu", "com.imagine.BaseActivity");
+        if ("c64".equals(system) && installed("com.explusalpha.C64Emu"))
+            return bridgeLaunch("com.explusalpha.C64Emu", "com.imagine.BaseActivity");
+        if ("nes".equals(system) && installed("com.explusalpha.NesEmu"))
+            return bridgeLaunch("com.explusalpha.NesEmu", "com.imagine.BaseActivity");
+        if ("snes".equals(system) && installed("com.explusalpha.Snes9xPlus"))
+            return bridgeLaunch("com.explusalpha.Snes9xPlus", "com.imagine.BaseActivity");
+        if (("gb".equals(system) || "gbc".equals(system)) &&
+                installed("com.explusalpha.GbcEmu"))
+            return bridgeLaunch("com.explusalpha.GbcEmu", "com.imagine.BaseActivity");
+        if ("gba".equals(system) && installed("com.explusalpha.GbaEmu"))
+            return bridgeLaunch("com.explusalpha.GbaEmu", "com.imagine.BaseActivity");
+        if (("sg1000".equals(system) || "mastersystem".equals(system) ||
+                "megadrive".equals(system) || "segacd".equals(system) ||
+                "sega32x".equals(system) || "gamegear".equals(system)) &&
+                installed("com.explusalpha.MdEmu"))
+            return bridgeLaunch("com.explusalpha.MdEmu", "com.imagine.BaseActivity");
+        if (("pcengine".equals(system) || "pcenginecd".equals(system)) &&
+                installed("com.PceEmu"))
+            return bridgeLaunch("com.PceEmu", "com.imagine.BaseActivity");
+        if (("neogeo".equals(system) || "neogeocd".equals(system)) &&
+                installed("com.explusalpha.NeoEmu"))
+            return bridgeLaunch("com.explusalpha.NeoEmu", "com.imagine.BaseActivity");
+        if ("ngp".equals(system) && installed("com.explusalpha.NgpEmu"))
+            return bridgeLaunch("com.explusalpha.NgpEmu", "com.imagine.BaseActivity");
+        if (("wonderswan".equals(system) || "wonderswancolor".equals(system)) &&
+                installed("com.explusalpha.SwanEmu"))
+            return bridgeLaunch("com.explusalpha.SwanEmu", "com.imagine.BaseActivity");
+        if ("saturn".equals(system) && installed("com.explusalpha.SaturnEmu"))
+            return bridgeLaunch("com.explusalpha.SaturnEmu", "com.imagine.BaseActivity");
+        if ("msx".equals(system) && installed("com.explusalpha.MsxEmu"))
+            return bridgeLaunch("com.explusalpha.MsxEmu", "com.imagine.BaseActivity");
+        if ("colecovision".equals(system) && installed("com.fms.colem.deluxe"))
+            return bridgeLaunch("com.fms.colem.deluxe", "com.fms.emulib.TVActivity");
+        if ("dreamcast".equals(system) && installed("com.flycast.emulator"))
+            return bridgeLaunch("com.flycast.emulator", "com.flycast.emulator.MainActivity");
+        if ("nds".equals(system) && installed("me.magnum.melonds.nightly"))
+            return bridgeLaunch("me.magnum.melonds.nightly",
+                    "me.magnum.melonds.ui.emulator.EmulatorActivity");
+        if ("nds".equals(system) && installed("me.magnum.melonds"))
+            return bridgeLaunch("me.magnum.melonds", "me.magnum.melonds.ui.emulator.EmulatorActivity");
+        if ("psvita".equals(system) && installed("org.vita3k.emulator"))
+            return bridgeLaunch("org.vita3k.emulator", "org.vita3k.emulator.Emulator");
         return "";
+    }
+
+    private static String bridgeLaunch(String targetPackage, String targetActivity) {
+        return "am start --user 0 -a com.thorium.launchbridge.LAUNCH_FILE " +
+                "-n com.thorium.preview/com.thorium.launchbridge.LaunchActivity " +
+                "--es path \"{file.path}\" --es target_package " + targetPackage +
+                " --es target_activity " + targetActivity +
+                " --es mime application/octet-stream --activity-clear-top";
     }
 
     private boolean installed(String packageName) {
@@ -2872,6 +3037,28 @@ final class ImportManager {
         final String url;
         MobyGamesRecord(double score, String year, String developer, String url) {
             this.score = score; this.year = year; this.developer = developer; this.url = url;
+        }
+    }
+    private static final class BundledGameRecord {
+        final String title;
+        final double critic;
+        final double user;
+        final String release;
+        final String developer;
+        final String publisher;
+        final String criticSources;
+        final String userSources;
+        BundledGameRecord(String title, double critic, double user, String release,
+                          String developer, String publisher, String criticSources,
+                          String userSources) {
+            this.title = title;
+            this.critic = critic;
+            this.user = user;
+            this.release = release;
+            this.developer = developer;
+            this.publisher = publisher;
+            this.criticSources = criticSources;
+            this.userSources = userSources;
         }
     }
 

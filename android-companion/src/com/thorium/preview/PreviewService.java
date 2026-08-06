@@ -96,12 +96,12 @@ public final class PreviewService extends Service {
         }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         NotificationChannel channel = new NotificationChannel(
-                "preview", "Pegasus Lucent", NotificationManager.IMPORTANCE_MIN);
+                "preview", "Lucent", NotificationManager.IMPORTANCE_MIN);
         channel.setDescription("Synchronizes previews, imports games, and checks for updates");
         manager.createNotificationChannel(channel);
         Notification notification = new Notification.Builder(this, "preview")
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("Pegasus Lucent")
+                .setContentTitle("Lucent")
                 .setContentText("Preview, library import, and updates are active")
                 .setOngoing(true)
                 .build();
@@ -346,6 +346,9 @@ public final class PreviewService extends Service {
                 respond(writer, "200 OK", importManager.statusJson());
             } else if ("/library/index".equals(path)) {
                 respond(writer, "200 OK", libraryIndexManager.json());
+            } else if ("/emulators/status".equals(path)) {
+                respond(writer, "200 OK", EmulatorCatalog.statusJson(
+                        this, importManager.activeSystemFolders()));
             } else if ("/archive/list".equals(path)) {
                 respond(writer, "200 OK", importManager.archiveJson());
             } else if ("/archive/include".equals(path)) {

@@ -11,8 +11,8 @@ ANDROID_JAR="$SDK_DIR/platforms/$ANDROID_PLATFORM/android.jar"
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}
 APKTOOL=${APKTOOL:-/opt/homebrew/bin/apktool}
 BUILD_DIR="$PROJECT_DIR/build"
-VERSION_NAME=3.0.39
-VERSION_CODE=69
+VERSION_NAME=3.1.1
+VERSION_CODE=73
 BASE_NAME=pegasus-fe_alpha16-105-g6b322063_android64.apk
 BASE_URL="https://raw.githubusercontent.com/mmatyas/pegasus-deploy-staging/continuous-android64/$BASE_NAME"
 BASE_SHA256=e595be198bfd21c1855eaf563d5af0deae9c9601e6efb195ed299f2065287c67
@@ -55,6 +55,8 @@ perl -0pi -e 's/package="org\.pegasus_frontend\.android"/package="com.thorium.pr
     s/android:label="Pegasus"/android:label="Lucent"/g;
     s/org\.pegasus_frontend\.android\.files/com.thorium.preview.files/g' \
     "$DECODED/AndroidManifest.xml"
+perl -0pi -e 's#android:icon="[^"]+"#android:icon="\@drawable/lucent_icon"#' \
+    "$DECODED/AndroidManifest.xml"
 perl -0pi -e "s/versionCode: .*/versionCode: $VERSION_CODE/; s/versionName: .*/versionName: $VERSION_NAME/" \
     "$DECODED/apktool.yml"
 perl -0pi -e 's/org\.pegasus_frontend\.android\.files/com.thorium.preview.files/g;
@@ -64,7 +66,7 @@ perl -0pi -e 's/org\.pegasus_frontend\.android\.files/com.thorium.preview.files/
 
 MANIFEST_COMPONENTS="$BUILD_DIR/work/manifest-components.xml"
 printf '%s\n' \
-'        <activity android:name="com.thorium.preview.PreviewActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" android:excludeFromRecents="true" android:launchMode="singleTop" android:resizeableActivity="true" android:screenOrientation="landscape" android:exported="true"/>' \
+'        <activity android:name="com.thorium.preview.PreviewActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" android:excludeFromRecents="true" android:launchMode="singleTop" android:resizeableActivity="true" android:screenOrientation="landscape" android:taskAffinity="com.thorium.preview.preview" android:exported="true"/>' \
 '        <activity android:name="com.thorium.preview.RomLaunchActivity" android:excludeFromRecents="true" android:exported="true"/>' \
 '        <activity android:name="com.thorium.preview.BrowserActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" android:exported="false"/>' \
 '        <service android:name="com.thorium.preview.PreviewService" android:exported="true"/>' \
@@ -80,11 +82,13 @@ perl -0pi -e "s#</application>#$COMPONENTS</application>#" "$DECODED/AndroidMani
 perl -0pi -e 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/><uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/><uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><application#' \
     "$DECODED/AndroidManifest.xml"
 
-mkdir -p "$DECODED/res/raw" "$DECODED/res/xml" "$DECODED/assets"
+mkdir -p "$DECODED/res/raw" "$DECODED/res/xml" "$DECODED/res/drawable" "$DECODED/assets"
 cp "$ROOT_DIR/android-companion/res/raw/"* "$DECODED/res/raw/"
 cp "$ROOT_DIR/android-launch-bridge/res/xml/stop_button_service.xml" "$DECODED/res/xml/"
+cp "$PROJECT_DIR/res/drawable/lucent_icon.xml" "$DECODED/res/drawable/"
 cp "$THEME_ARCHIVE" "$ROOT_DIR/android-companion/assets/pegasus-lucent-version.txt" \
     "$DECODED/assets/"
+cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$DECODED/assets/THIRD_PARTY_NOTICES.md"
 
 # Compile all Java services together. The QtApplication stub is compile-only;
 # the real superclass remains in Pegasus's primary classes.dex.
