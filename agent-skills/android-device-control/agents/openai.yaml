@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android Device Control"
+  short_description: "Control Android by quick link or ADB"
+  default_prompt: "Use $android-device-control to pair with my Android device using the simplest safe method, then inspect and operate it."
