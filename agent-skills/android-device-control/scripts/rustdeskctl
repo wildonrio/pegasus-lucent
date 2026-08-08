@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Check and launch the RustDesk controller used by Android quick-link mode."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+
+APP = Path("/Applications/RustDesk.app")
+INFO = APP / "Contents/Info.plist"
+
+
+def status() -> int:
+    installed = APP.is_dir()
+    version = None
+    if INFO.is_file():
+        with INFO.open("rb") as handle:
+            metadata = plistlib.load(handle)
+        version = metadata.get("CFBundleShortVersionString")
+    running = subprocess.run(
+        ["/usr/bin/pgrep", "-x", "RustDesk"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    ).returncode == 0
+    print(
+        json.dumps(
+            {
+                "installed": installed,
+                "version": version,
+                "running": running,
+                "android_link": "https://rustdesk.com/",
+                "easy_to_type": "rustdesk.com",
+            },
+            indent=2,
+        )
+    )
+    return 0 if installed else 2
+
+
+def launch() -> int:
+    if not APP.is_dir():
+        print("rustdeskctl: RustDesk is not installed", file=sys.stderr)
+        return 2
+    result = subprocess.run(["/usr/bin/open", "-a", "RustDesk"], check=False)
+    if result.returncode:
+        print("rustdeskctl: failed to launch RustDesk", file=sys.stderr)
+        return result.returncode
+    print("RustDesk launched. Android link: https://rustdesk.com/")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["status", "launch"])
+    args = parser.parse_args()
+    return status() if args.command == "status" else launch()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

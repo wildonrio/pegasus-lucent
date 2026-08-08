@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Small, dependency-free Android visual-control CLI built on adb and scrcpy."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Iterable, Optional
+
+
+class ControlError(RuntimeError):
+    pass
+
+
+def executable(name: str) -> Optional[str]:
+    found = shutil.which(name)
+    if found:
+        return found
+    if name == "adb":
+        candidates = [
+            Path.home() / ".codex/tools/android-platform-tools/adb",
+            Path.home() / "Library/Android/sdk/platform-tools/adb",
+        ]
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
+def require_executable(name: str, install_hint: str) -> str:
+    path = executable(name)
+    if not path:
+        raise ControlError(f"{name} is not installed. {install_hint}")
+    return path
+
+
+def run(
+    argv: list[str],
+    *,
+    check: bool = True,
+    binary: bool = False,
+    timeout: Optional[float] = 30,
+) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            argv,
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=not binary,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ControlError(f"Command timed out: {shlex.join(argv)}") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        detail = (stderr or stdout or "unknown error").strip()
+        raise ControlError(f"Command failed: {shlex.join(argv)}\n{detail}") from exc
+
+
+def adb_base(serial: Optional[str] = None) -> list[str]:
+    adb = require_executable("adb", "Install it with: brew install android-platform-tools")
+    result = [adb]
+    chosen = serial or os.environ.get("ANDROID_SERIAL")
+    if chosen:
+        result.extend(["-s", chosen])
+    return result
+
+
+def adb(
+    args: Iterable[str],
+    *,
+    serial: Optional[str] = None,
+    binary: bool = False,
+    timeout: Optional[float] = 30,
+) -> subprocess.CompletedProcess:
+    return run(adb_base(serial) + list(args), binary=binary, timeout=timeout)
+
+
+def shell(command: str, *, serial: Optional[str] = None, timeout: Optional[float] = 30) -> str:
+    return adb(["shell", command], serial=serial, timeout=timeout).stdout
+
+
+def parse_devices(raw: str) -> list[dict[str, str]]:
+    devices: list[dict[str, str]] = []
+    for line in raw.splitlines()[1:]:
+        line = line.strip()
+        if not line or line.startswith("*"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        item = {"serial": parts[0], "state": parts[1]}
+        for token in parts[2:]:
+            if ":" in token:
+                key, value = token.split(":", 1)
+                item[key] = value
+        devices.append(item)
+    return devices
+
+
+def get_devices() -> list[dict[str, str]]:
+    raw = run(adb_base() + ["devices", "-l"]).stdout
+    return parse_devices(raw)
+
+
+def chosen_serial(requested: Optional[str]) -> str:
+    candidate = requested or os.environ.get("ANDROID_SERIAL")
+    devices = get_devices()
+    if candidate:
+        match = next((d for d in devices if d["serial"] == candidate), None)
+        if not match:
+            raise ControlError(f"Device {candidate!r} is not listed by adb")
+        if match["state"] != "device":
+            raise ControlError(f"Device {candidate!r} is {match['state']}, not ready")
+        return candidate
+    ready = [d for d in devices if d["state"] == "device"]
+    if not ready:
+        states = ", ".join(f"{d['serial']} ({d['state']})" for d in devices) or "none"
+        raise ControlError(f"No authorized Android device is ready. Listed devices: {states}")
+    if len(ready) > 1:
+        serials = ", ".join(d["serial"] for d in ready)
+        raise ControlError(f"Multiple devices are ready ({serials}); pass --serial SERIAL")
+    return ready[0]["serial"]
+
+
+def serial_for(args: argparse.Namespace) -> str:
+    return chosen_serial(args.serial)
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        handle.write(data)
+        temp = Path(handle.name)
+    temp.replace(path)
+
+
+def capture_screen(serial: str, output: Path) -> Path:
+    result = adb(["exec-out", "screencap", "-p"], serial=serial, binary=True, timeout=30)
+    data = result.stdout
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        detail = result.stderr.decode(errors="replace").strip()
+        raise ControlError(f"Device did not return a PNG screenshot. {detail}")
+    atomic_write(output, data)
+    return output.resolve()
+
+
+def capture_ui(serial: str, output: Path) -> Path:
+    remote = "/data/local/tmp/codex-window.xml"
+    try:
+        shell(f"uiautomator dump --compressed {remote} >/dev/null", serial=serial, timeout=20)
+        data = adb(["exec-out", "cat", remote], serial=serial, binary=True, timeout=20).stdout
+    finally:
+        try:
+            shell(f"rm -f {remote}", serial=serial, timeout=5)
+        except ControlError:
+            pass
+    if b"<hierarchy" not in data:
+        raise ControlError("Android did not return a UI hierarchy; the current app may not expose one")
+    data = data[data.find(b"<?xml") :] if b"<?xml" in data else data[data.find(b"<hierarchy") :]
+    atomic_write(output, data)
+    return output.resolve()
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    with path.open("rb") as handle:
+        header = handle.read(24)
+    if len(header) < 24 or not header.startswith(b"\x89PNG"):
+        raise ControlError(f"Not a valid PNG: {path}")
+    return struct.unpack(">II", header[16:24])
+
+
+def active_window(serial: str) -> dict[str, Optional[str]]:
+    text = shell("dumpsys window windows", serial=serial, timeout=20)
+    match = re.search(r"mCurrentFocus=Window\{[^}]*\s([A-Za-z0-9_.$-]+)/([^}\s]+)", text)
+    if not match:
+        match = re.search(r"mFocusedApp=.*?\s([A-Za-z0-9_.$-]+)/([^}\s]+)", text)
+    return {
+        "package": match.group(1) if match else None,
+        "activity": match.group(2) if match else None,
+    }
+
+
+def load_nodes(serial: str) -> list[dict[str, object]]:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "ui.xml"
+        capture_ui(serial, path)
+        root = ET.parse(path).getroot()
+    nodes: list[dict[str, object]] = []
+    for node in root.iter("node"):
+        bounds = node.attrib.get("bounds", "")
+        match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if not match:
+            continue
+        x1, y1, x2, y2 = map(int, match.groups())
+        nodes.append(
+            {
+                "text": node.attrib.get("text", ""),
+                "content_desc": node.attrib.get("content-desc", ""),
+                "resource_id": node.attrib.get("resource-id", ""),
+                "class": node.attrib.get("class", ""),
+                "clickable": node.attrib.get("clickable") == "true",
+                "enabled": node.attrib.get("enabled") == "true",
+                "bounds": [x1, y1, x2, y2],
+                "center": [(x1 + x2) // 2, (y1 + y2) // 2],
+            }
+        )
+    return nodes
+
+
+def matching_nodes(nodes: list[dict[str, object]], query: str, exact: bool) -> list[dict[str, object]]:
+    needle = query.casefold()
+    matches: list[dict[str, object]] = []
+    for node in nodes:
+        values = [str(node["text"]), str(node["content_desc"]), str(node["resource_id"])]
+        if exact:
+            matched = any(value.casefold() == needle for value in values if value)
+        else:
+            matched = any(needle in value.casefold() for value in values if value)
+        if matched:
+            matches.append(node)
+    return matches
+
+
+def input_command(serial: str, fragment: str) -> None:
+    shell(f"input {fragment}", serial=serial)
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    report: dict[str, object] = {
+        "adb": executable("adb"),
+        "scrcpy": executable("scrcpy"),
+        "android_serial_env": os.environ.get("ANDROID_SERIAL"),
+        "devices": [],
+    }
+    if report["adb"]:
+        report["adb_version"] = run([str(report["adb"]), "version"]).stdout.splitlines()[0]
+        report["devices"] = get_devices()
+    else:
+        report["install"] = "brew install android-platform-tools scrcpy"
+    print(json.dumps(report, indent=2))
+
+
+def cmd_devices(args: argparse.Namespace) -> None:
+    print(json.dumps(get_devices(), indent=2))
+
+
+def cmd_pair(args: argparse.Namespace) -> None:
+    result = run(adb_base() + ["pair", args.address, args.code], timeout=30)
+    print((result.stdout or result.stderr).strip())
+
+
+def cmd_connect(args: argparse.Namespace) -> None:
+    result = run(adb_base() + ["connect", args.address], timeout=30)
+    print((result.stdout or result.stderr).strip())
+
+
+def cmd_disconnect(args: argparse.Namespace) -> None:
+    command = adb_base() + ["disconnect"]
+    if args.address:
+        command.append(args.address)
+    result = run(command, timeout=30)
+    print((result.stdout or result.stderr).strip())
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    properties = {
+        "serial": serial,
+        "manufacturer": shell("getprop ro.product.manufacturer", serial=serial).strip(),
+        "model": shell("getprop ro.product.model", serial=serial).strip(),
+        "android": shell("getprop ro.build.version.release", serial=serial).strip(),
+        "sdk": shell("getprop ro.build.version.sdk", serial=serial).strip(),
+        "display": shell("wm size", serial=serial).strip(),
+    }
+    properties.update(active_window(serial))
+    print(json.dumps(properties, indent=2))
+
+
+def cmd_screenshot(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    output = Path(args.output or f"/tmp/android-screen-{serial.replace(':', '_')}.png").expanduser()
+    print(capture_screen(serial, output))
+
+
+def cmd_ui(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    output = Path(args.output or f"/tmp/android-ui-{serial.replace(':', '_')}.xml").expanduser()
+    print(capture_ui(serial, output))
+
+
+def cmd_observe(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    output_dir = Path(args.output_dir or f"/tmp/android-observe-{serial.replace(':', '_')}-{stamp}").expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    screen = capture_screen(serial, output_dir / "screen.png")
+    ui_path: Optional[Path] = None
+    ui_error: Optional[str] = None
+    try:
+        ui_path = capture_ui(serial, output_dir / "ui.xml")
+    except ControlError as exc:
+        ui_error = str(exc)
+    width, height = png_size(screen)
+    state = {
+        "serial": serial,
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "screen": str(screen),
+        "ui": str(ui_path) if ui_path else None,
+        "ui_error": ui_error,
+        "width": width,
+        "height": height,
+        **active_window(serial),
+    }
+    state_path = (output_dir / "state.json").resolve()
+    atomic_write(state_path, (json.dumps(state, indent=2) + "\n").encode())
+    print(json.dumps({**state, "state": str(state_path)}, indent=2))
+
+
+def cmd_screen_size(args: argparse.Namespace) -> None:
+    print(shell("wm size", serial=serial_for(args)).strip())
+
+
+def cmd_tap(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    input_command(serial, f"tap {args.x} {args.y}")
+
+
+def cmd_long_press(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    input_command(serial, f"swipe {args.x} {args.y} {args.x} {args.y} {args.duration}")
+
+
+def cmd_swipe(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    input_command(serial, f"swipe {args.x1} {args.y1} {args.x2} {args.y2} {args.duration}")
+
+
+def cmd_text(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    if any(ord(char) > 127 for char in args.value):
+        raise ControlError("adb text entry only supports ASCII reliably; use scrcpy for this text")
+    encoded = args.value.replace("%", "%25").replace(" ", "%s")
+    input_command(serial, f"text {shlex.quote(encoded)}")
+
+
+KEY_ALIASES = {
+    "BACK": "4",
+    "HOME": "3",
+    "APP_SWITCH": "187",
+    "RECENTS": "187",
+    "ENTER": "66",
+    "TAB": "61",
+    "DEL": "67",
+    "DELETE": "67",
+    "ESCAPE": "111",
+    "WAKEUP": "224",
+    "SLEEP": "223",
+    "POWER": "26",
+    "VOLUME_UP": "24",
+    "VOLUME_DOWN": "25",
+    "DPAD_UP": "19",
+    "DPAD_DOWN": "20",
+    "DPAD_LEFT": "21",
+    "DPAD_RIGHT": "22",
+    "DPAD_CENTER": "23",
+}
+
+
+def cmd_key(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    value = args.key.upper()
+    code = KEY_ALIASES.get(value, value.removeprefix("KEYCODE_"))
+    if not re.fullmatch(r"[A-Z0-9_]+", code):
+        raise ControlError(f"Invalid key code: {args.key}")
+    input_command(serial, f"keyevent {code}")
+
+
+def cmd_wake(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    input_command(serial, "keyevent 224")
+
+
+def cmd_open_url(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    shell(f"am start -a android.intent.action.VIEW -d {shlex.quote(args.url)}", serial=serial)
+
+
+def cmd_launch(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    if args.activity:
+        component = f"{args.package}/{args.activity}"
+        print(shell(f"am start -n {shlex.quote(component)}", serial=serial).strip())
+    else:
+        print(
+            shell(
+                f"monkey -p {shlex.quote(args.package)} -c android.intent.category.LAUNCHER 1",
+                serial=serial,
+            ).strip()
+        )
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    shell(f"am force-stop {shlex.quote(args.package)}", serial=serial_for(args))
+
+
+def cmd_find(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    matches = matching_nodes(load_nodes(serial), args.query, args.exact)
+    print(json.dumps(matches, indent=2))
+    if not matches:
+        raise ControlError(f"No UI node matched {args.query!r}")
+
+
+def cmd_tap_text(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    matches = matching_nodes(load_nodes(serial), args.query, args.exact)
+    if not matches:
+        raise ControlError(f"No UI node matched {args.query!r}")
+    if args.index < 0 or args.index >= len(matches):
+        raise ControlError(f"Match index {args.index} is out of range; found {len(matches)} match(es)")
+    target = matches[args.index]
+    x, y = target["center"]
+    input_command(serial, f"tap {x} {y}")
+    print(json.dumps(target, indent=2))
+
+
+def cmd_wait_text(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    deadline = time.monotonic() + args.timeout
+    last_error: Optional[str] = None
+    while time.monotonic() <= deadline:
+        try:
+            matches = matching_nodes(load_nodes(serial), args.query, args.exact)
+            if matches:
+                print(json.dumps(matches, indent=2))
+                return
+        except ControlError as exc:
+            last_error = str(exc)
+        time.sleep(args.interval)
+    suffix = f" Last UI error: {last_error}" if last_error else ""
+    raise ControlError(f"Timed out waiting for UI text {args.query!r}.{suffix}")
+
+
+def cmd_mirror(args: argparse.Namespace) -> None:
+    serial = serial_for(args)
+    scrcpy = require_executable("scrcpy", "Install it with: brew install scrcpy")
+    adb_path = require_executable("adb", "Install Android SDK Platform-Tools")
+    os.environ["PATH"] = str(Path(adb_path).parent) + os.pathsep + os.environ.get("PATH", "")
+    command = [scrcpy, "--serial", serial, "--window-title", f"Android — {serial}"]
+    if args.max_size:
+        command.extend(["--max-size", str(args.max_size)])
+    if args.turn_screen_off:
+        command.append("--turn-screen-off")
+    if args.no_audio:
+        command.append("--no-audio")
+    command.extend(args.scrcpy_arg)
+    os.execv(scrcpy, command)
+
+
+def add_common_subcommands(subparsers: argparse._SubParsersAction) -> None:
+    for name, handler, help_text in [
+        ("doctor", cmd_doctor, "Check tools and connection state"),
+        ("devices", cmd_devices, "List ADB devices as JSON"),
+        ("status", cmd_status, "Show selected device and active window"),
+        ("screen-size", cmd_screen_size, "Print the selected device display size"),
+        ("wake", cmd_wake, "Wake the selected device"),
+    ]:
+        parser = subparsers.add_parser(name, help=help_text)
+        parser.set_defaults(handler=handler)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--serial", help="Exact ADB device serial; may also use ANDROID_SERIAL")
+    sub = parser.add_subparsers(dest="command", required=True)
+    add_common_subcommands(sub)
+
+    pair = sub.add_parser("pair", help="Pair an Android 11+ wireless-debugging device")
+    pair.add_argument("address", help="IP:pairing-port shown on the device")
+    pair.add_argument("code", help="Pairing code shown on the device")
+    pair.set_defaults(handler=cmd_pair)
+
+    connect = sub.add_parser("connect", help="Connect to an ADB device over TCP/IP")
+    connect.add_argument("address", help="IP:port")
+    connect.set_defaults(handler=cmd_connect)
+
+    disconnect = sub.add_parser("disconnect", help="Disconnect one or all TCP/IP devices")
+    disconnect.add_argument("address", nargs="?", help="Optional IP:port")
+    disconnect.set_defaults(handler=cmd_disconnect)
+
+    screenshot = sub.add_parser("screenshot", help="Capture a PNG screenshot")
+    screenshot.add_argument("--output", "-o")
+    screenshot.set_defaults(handler=cmd_screenshot)
+
+    ui = sub.add_parser("ui", help="Capture the accessibility UI hierarchy as XML")
+    ui.add_argument("--output", "-o")
+    ui.set_defaults(handler=cmd_ui)
+
+    observe = sub.add_parser("observe", help="Capture screenshot, UI hierarchy, and state JSON")
+    observe.add_argument("--output-dir", "-o")
+    observe.set_defaults(handler=cmd_observe)
+
+    tap = sub.add_parser("tap", help="Tap screen coordinates")
+    tap.add_argument("x", type=int)
+    tap.add_argument("y", type=int)
+    tap.set_defaults(handler=cmd_tap)
+
+    long_press = sub.add_parser("long-press", help="Long-press screen coordinates")
+    long_press.add_argument("x", type=int)
+    long_press.add_argument("y", type=int)
+    long_press.add_argument("--duration", type=int, default=750, help="Milliseconds")
+    long_press.set_defaults(handler=cmd_long_press)
+
+    swipe = sub.add_parser("swipe", help="Swipe between coordinates")
+    swipe.add_argument("x1", type=int)
+    swipe.add_argument("y1", type=int)
+    swipe.add_argument("x2", type=int)
+    swipe.add_argument("y2", type=int)
+    swipe.add_argument("--duration", type=int, default=400, help="Milliseconds")
+    swipe.set_defaults(handler=cmd_swipe)
+
+    text_parser = sub.add_parser("text", help="Type ASCII text into the focused field")
+    text_parser.add_argument("value")
+    text_parser.set_defaults(handler=cmd_text)
+
+    key = sub.add_parser("key", help="Press an Android key name or numeric keycode")
+    key.add_argument("key")
+    key.set_defaults(handler=cmd_key)
+
+    open_url = sub.add_parser("open-url", help="Open a URL with an Android VIEW intent")
+    open_url.add_argument("url")
+    open_url.set_defaults(handler=cmd_open_url)
+
+    launch = sub.add_parser("launch", help="Launch an installed Android package")
+    launch.add_argument("package")
+    launch.add_argument("--activity", help="Optional activity class")
+    launch.set_defaults(handler=cmd_launch)
+
+    stop = sub.add_parser("stop", help="Force-stop an Android package")
+    stop.add_argument("package")
+    stop.set_defaults(handler=cmd_stop)
+
+    find = sub.add_parser("find", help="Find UI nodes by text, description, or resource ID")
+    find.add_argument("query")
+    find.add_argument("--exact", action="store_true")
+    find.set_defaults(handler=cmd_find)
+
+    tap_text = sub.add_parser("tap-text", help="Tap the center of a matching UI node")
+    tap_text.add_argument("query")
+    tap_text.add_argument("--exact", action="store_true")
+    tap_text.add_argument("--index", type=int, default=0, help="Zero-based match index")
+    tap_text.set_defaults(handler=cmd_tap_text)
+
+    wait_text = sub.add_parser("wait-text", help="Poll until a matching UI node appears")
+    wait_text.add_argument("query")
+    wait_text.add_argument("--exact", action="store_true")
+    wait_text.add_argument("--timeout", type=float, default=10)
+    wait_text.add_argument("--interval", type=float, default=0.5)
+    wait_text.set_defaults(handler=cmd_wait_text)
+
+    mirror = sub.add_parser("mirror", help="Open a live interactive scrcpy window")
+    mirror.add_argument("--max-size", type=int, default=1600)
+    mirror.add_argument("--turn-screen-off", action="store_true")
+    mirror.add_argument("--no-audio", action="store_true")
+    mirror.add_argument("scrcpy_arg", nargs="*", help="Additional scrcpy arguments after --")
+    mirror.set_defaults(handler=cmd_mirror)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.handler(args)
+        return 0
+    except ControlError as exc:
+        print(f"androidctl: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("androidctl: interrupted", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
